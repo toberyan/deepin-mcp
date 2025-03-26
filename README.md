@@ -63,7 +63,62 @@ For more installation options, visit [UV's official documentation](https://githu
    MODEL=gpt-3.5-turbo  # Optional: Specify the model to use
    ```
 
+5. Install required dependencies:
+
+   Using UV (recommended):
+   ```bash
+   # Install core dependencies
+   uv pip install -e .
+   
+   # Or install individual packages
+   uv add openai  # OpenAI API client
+   uv add python-dotenv  # For loading environment variables
+   uv add mcp  # Machine Conversation Protocol library
+   ```
+
+   Using standard pip:
+   ```bash
+   pip install openai python-dotenv mcp
+   ```
+
+   Each server type may require additional dependencies:
+   ```bash
+   # For JavaScript servers
+   uv add node-fetch  # If connecting to JavaScript MCP servers
+   
+   # For additional functionality
+   uv add asyncio  # For asynchronous operations
+   uv add pathlib  # For file path handling
+   ```
+
 ## Usage
+
+### Quickstart with UV
+
+Get up and running quickly with UV:
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/deepin-mcp-python.git
+cd deepin-mcp-python
+
+# Install UV
+curl -sSf https://astral.sh/uv/install.sh | bash
+
+# Create a virtual environment and install dependencies
+uv venv
+uv pip install -e .
+
+# Create .env file (replace with your actual API key)
+echo "OPENAI_API_KEY=your_openai_api_key" > .env
+echo "MODEL=gpt-3.5-turbo" >> .env
+
+# Run the client with bash server
+uv run python client.py servers/bash_server.py
+
+# Or run the task planning system
+uv run python planning.py
+```
 
 ### Basic Usage
 
@@ -160,6 +215,11 @@ uv run python client.py weather_server.py
 
 Example query: "查询北京的天气"
 
+Dependencies:
+```bash
+uv add requests  # For HTTP requests to weather APIs
+```
+
 ### File Server
 
 The `file_server.py` provides MCP tools for file operations like open, copy, move, rename, delete, and create files.
@@ -175,6 +235,11 @@ uv run python client.py file_server.py
 
 Example query: "创建一个名为test.txt的文件"
 
+Dependencies:
+```bash
+uv add pathlib  # For file path handling
+```
+
 ### Bash Server
 
 The `bash_server.py` provides MCP tools for executing Linux bash commands.
@@ -186,6 +251,13 @@ python client.py bash_server.py
 Or using UV:
 ```bash
 uv run python client.py bash_server.py
+```
+
+Example query: "列出当前目录下的所有文件"
+
+Dependencies:
+```bash
+uv add shlex  # For shell command parsing
 ```
 
 ## Development
