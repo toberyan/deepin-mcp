@@ -18,6 +18,26 @@ This MCP client allows you to:
 - OpenAI API key
 - MCP server to connect to
 
+### Installing UV (Recommended)
+
+UV is a fast, reliable Python package installer and resolver. It's recommended for this project:
+
+1. Install UV:
+   ```bash
+   # Unix (macOS, Linux)
+   curl -sSf https://astral.sh/uv/install.sh | bash
+
+   # Windows (PowerShell)
+   irm https://astral.sh/uv/install.ps1 | iex
+   ```
+
+2. Verify installation:
+   ```bash
+   uv --version
+   ```
+
+For more installation options, visit [UV's official documentation](https://github.com/astral-sh/uv).
+
 ### Installation
 
 1. Clone this repository
@@ -30,12 +50,22 @@ This MCP client allows you to:
    ```bash
    pip install -e .
    ```
-4. Create a `.env` file with your API keys:
+   Or using UV (recommended):
+   ```bash
+   uv venv
+   uv pip install -e .
    ```
+4. Create a `.env` file with your API keys and configuration:
+   ```
+   # OpenAI API Configuration
    OPENAI_API_KEY=your_openai_api_key
+   BASE_URL=https://api.openai.com/v1  # Optional: Use your own OpenAI API proxy
+   MODEL=gpt-3.5-turbo  # Optional: Specify the model to use
    ```
 
 ## Usage
+
+### Basic Usage
 
 Run the client by specifying the path to your MCP server script:
 
@@ -43,11 +73,66 @@ Run the client by specifying the path to your MCP server script:
 python client.py path/to/your/server_script.py
 ```
 
-Or for JavaScript servers:
+Or using UV:
+```bash
+uv run python client.py path/to/your/server_script.py
+```
+
+For JavaScript servers:
 
 ```bash
 python client.py path/to/your/server_script.js
 ```
+
+Or using UV:
+```bash
+uv run python client.py path/to/your/server_script.js
+```
+
+### Task Planning System
+
+The project includes a powerful task planning system (`planning.py`) that can:
+1. Break down complex user requests into sequential tasks
+2. Execute tasks automatically using the MCP server
+3. Provide detailed execution summaries
+
+To use the task planning system:
+
+```bash
+python planning.py
+```
+
+Or using UV (recommended):
+```bash
+uv run python planning.py
+```
+
+Example interaction:
+```
+Welcome to the Task Planning System
+This system will break down your request into multiple tasks and execute them sequentially
+
+请输入您的请求 (输入'quit'退出): Create a new directory called 'projects' and copy all .txt files from 'documents' to it
+
+正在分析您的请求...
+已将您的请求拆解为 3 个任务:
+1. Create a new directory called 'projects'
+2. List all .txt files in the 'documents' directory
+3. Copy all .txt files from 'documents' to 'projects'
+
+是否执行这些任务? (y/n): y
+
+[Task execution progress will be shown here]
+
+执行总结:
+[Detailed summary of the executed tasks will be shown here]
+```
+
+The task planning system is particularly useful for:
+- Complex file operations
+- Multi-step system configurations
+- Automated workflow execution
+- Batch processing tasks
 
 ### Interactive Mode
 
@@ -68,6 +153,11 @@ The `weather_server.py` provides an MCP tool to query weather information for a 
 python client.py weather_server.py
 ```
 
+Or using UV:
+```bash
+uv run python client.py weather_server.py
+```
+
 Example query: "查询北京的天气"
 
 ### File Server
@@ -78,6 +168,11 @@ The `file_server.py` provides MCP tools for file operations like open, copy, mov
 python client.py file_server.py
 ```
 
+Or using UV:
+```bash
+uv run python client.py file_server.py
+```
+
 Example query: "创建一个名为test.txt的文件"
 
 ### Bash Server
@@ -86,6 +181,11 @@ The `bash_server.py` provides MCP tools for executing Linux bash commands.
 
 ```bash
 python client.py bash_server.py
+```
+
+Or using UV:
+```bash
+uv run python client.py bash_server.py
 ```
 
 ## Development
