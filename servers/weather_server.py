@@ -6,7 +6,7 @@ from mcp.server.fastmcp import FastMCP
 mcp = FastMCP("WeatherServer")
 
 OPENWEATHER_API_BASE = "https://api.openweathermap.org/data/2.5/weather"
-API_KEY = "00e7ce455e2967d191355f3c7321c943"
+API_KEY = "YOUR_API_KEY"
 USER_AGENT = "weather-app/1.0"
 
 async def fetch_weather(city: str) -> dict[str, Any] | None:
