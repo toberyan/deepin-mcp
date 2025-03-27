@@ -40,6 +40,13 @@ class MCPClient:
         # 设置历史记录最大长度
         self.max_history_length = 10
         
+        # 从环境变量获取命令间隔时间(毫秒)，默认为100ms
+        try:
+            self.command_delay = float(os.getenv("COMMAND_DELAY_MS", "100")) / 1000.0
+        except ValueError:
+            print(f"\n警告: COMMAND_DELAY_MS 环境变量格式不正确，使用默认值100ms")
+            self.command_delay = 0.1
+        
     def _add_to_history(self, query: str, response: str):
         """
         添加一对对话到历史记录
@@ -151,24 +158,29 @@ class MCPClient:
             # 提取命令部分
             cmd_parts = translated_content.split("CMD:", 1)[1].strip()
             
-            # 检查是否有use_shell参数
+            # 检查是否有多条命令（使用分号分隔）
+            commands = []
             use_shell = False
+            
+            # 检查是否有use_shell参数
             if ";use_shell:true" in cmd_parts.lower():
                 use_shell = True
                 cmd_parts = cmd_parts.split(";use_shell:", 1)[0].strip()
             
-            # 分解命令和参数
-            if " " in cmd_parts:
-                command = cmd_parts.split(" ", 1)[0]
-                args = cmd_parts.split(" ", 1)[1]
+            # 处理多条命令的情况（用分号分隔的多条命令）
+            if ";" in cmd_parts and not use_shell:
+                commands = [cmd.strip() for cmd in cmd_parts.split(";") if cmd.strip()]
             else:
-                command = cmd_parts
-                args = ""
+                # 单个命令或者需要shell执行的复杂命令
+                commands = [cmd_parts]
             
             # 自动执行命令
-            print(f"\n识别到命令，正在执行: {command} {args}")
+            if len(commands) > 1:
+                print(f"\n识别到多条命令，将依次执行，命令间隔{int(self.command_delay * 1000)}毫秒: {commands}")
+            else:
+                print(f"\n识别到命令，正在执行: {commands[0]}")
+                
             try:
-                print(f"\n\n[Auto running bash command: {command} with args {args}, use_shell={use_shell}]\n\n")
                 response = await self.session.list_tools()
                 
                 # 构建可用工具列表
@@ -188,22 +200,43 @@ class MCPClient:
                         break
                 
                 if bash_tool:
-                    # 构建工具调用参数
-                    tool_args = {
-                        "command": command,
-                        "args": args
-                    }
+                    all_results = []
                     
-                    if use_shell:
-                        tool_args["use_shell"] = True
+                    for i, command_str in enumerate(commands):
+                        # 分解命令和参数
+                        if " " in command_str:
+                            command = command_str.split(" ", 1)[0]
+                            args = command_str.split(" ", 1)[1]
+                        else:
+                            command = command_str
+                            args = ""
+                            
+                        print(f"\n\n[Auto running bash command: {command} with args {args}, use_shell={use_shell}]\n\n")
+                        
+                        # 构建工具调用参数
+                        tool_args = {
+                            "command": command,
+                            "args": args
+                        }
+                        
+                        if use_shell:
+                            tool_args["use_shell"] = True
+                        
+                        result = await self.session.call_tool("run_bash", tool_args)
+                        tool_result = str(result.content[0].text)
+                        all_results.append(tool_result)
+                        
+                        # 如果不是最后一条命令，等待命令间隔
+                        if i < len(commands) - 1:
+                            await asyncio.sleep(self.command_delay)
                     
-                    result = await self.session.call_tool("run_bash", tool_args)
-                    tool_result = str(result.content[0].text)
+                    # 合并所有结果
+                    combined_result = "\n\n".join(all_results)
                     
                     # 更新历史消息
-                    self._add_to_history(query, tool_result)
+                    self._add_to_history(query, combined_result)
                     
-                    return tool_result
+                    return combined_result
                 else:
                     # 如果找不到run_bash工具，回退到常规工具调用处理
                     user_message = f"执行bash命令：{cmd_parts}"

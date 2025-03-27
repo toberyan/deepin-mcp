@@ -215,13 +215,14 @@ class TaskPlanner:
                 "content": """你是一个专业的任务分解助手。你的工作是将用户的复杂请求拆解为可以按顺序执行的具体任务列表。
                 请遵循以下规则：
                 1. 将复杂请求分解为3-8个简单、明确的步骤
-                2. 每个步骤应该是一条完整的Linux命令或明确的操作指令
+                2. 将输入内容全部理解并翻译为 Linux bash 命令。如果涉及到打开文件操作，请使用xdg-open命令。请不要解释命令功能，只输出命令本身。格式为：CMD:实际命令。例如对于'显示当前目录'，只需返回'CMD:ls'。对于复杂命令，如果需要使用shell特性（如管道、重定向），应添加参数'use_shell:true'，例如：'CMD:ls -la | grep .txt;use_shell:true
                 3. 步骤之间应该有清晰的先后顺序关系
                 4. 每个步骤应该是可独立执行的
                 5. 不要包含解释或分析，只提供步骤列表
                 6. 每个步骤必须明确指出操作的对象（文件、目录等）
                 7. 如果后续步骤依赖于前面步骤的结果，必须明确指出
                 8. 以JSON格式返回，格式为：{"tasks": ["任务1", "任务2", "任务3", ...]}
+                9. 不要使用Markdown格式化，直接返回原始JSON
                 """
             },
             {"role": "user", "content": f"请将以下请求拆解为具体的执行步骤：{user_request}"}
@@ -234,28 +235,65 @@ class TaskPlanner:
         )
         
         content = response.choices[0].message.content
-        try:
-            tasks_data = json.loads(content)
-            return tasks_data.get("tasks", [])
-        except json.JSONDecodeError:
-            print(f"解析JSON失败: {content}")
-            # 尝试提取可能的任务
+        
+        # 清理内容，去除可能的Markdown格式化
+        cleaned_content = content
+        # 移除可能存在的Markdown代码块标记
+        if "```" in cleaned_content:
+            # 提取```和```之间的内容
             import re
-            # 使用更精确的正则表达式来匹配数组中的字符串
-            tasks = re.findall(r'\[(.*?)\]', content)
-            if tasks:
-                # 提取数组中的字符串
-                task_list = re.findall(r'"([^"]+)"', tasks[0])
-                if task_list:
-                    return task_list
-            # 如果还是找不到任务，尝试直接匹配引号中的内容，但排除常见的JSON键名
-            tasks = re.findall(r'"([^"]+)"', content)
-            if tasks:
-                # 过滤掉常见的JSON键名
-                filtered_tasks = [task for task in tasks if task.lower() not in ['tasks', 'task', 'steps', 'step']]
-                if filtered_tasks:
-                    return filtered_tasks
-            return [user_request]  # 如果解析失败，将整个请求作为一个任务
+            code_blocks = re.findall(r'```(?:json)?(.*?)```', cleaned_content, re.DOTALL)
+            if code_blocks:
+                cleaned_content = code_blocks[0].strip()
+            else:
+                # 如果无法提取代码块，则移除所有```标记
+                cleaned_content = re.sub(r'```(?:json)?', '', cleaned_content)
+                cleaned_content = cleaned_content.replace('```', '').strip()
+        
+        try:
+            tasks_data = json.loads(cleaned_content)
+            return tasks_data.get("tasks", [])
+        except json.JSONDecodeError as e:
+            print(f"解析JSON失败: {content}")
+            print(f"错误详情: {str(e)}")
+            
+            # 尝试更强大的解析方法
+            try:
+                # 1. 尝试使用正则表达式直接提取tasks数组
+                import re
+                tasks_match = re.search(r'"tasks"\s*:\s*\[(.*?)\]', cleaned_content, re.DOTALL)
+                if tasks_match:
+                    tasks_str = tasks_match.group(1)
+                    # 提取数组中的字符串
+                    task_list = re.findall(r'"([^"]*?)"', tasks_str)
+                    if task_list:
+                        return task_list
+                
+                # 2. 如果第一种方法失败，尝试找到所有命令格式的字符串
+                cmd_list = re.findall(r'CMD:(.*?)(?:;|"|$)', cleaned_content)
+                if cmd_list:
+                    return [f"CMD:{cmd.strip()}" for cmd in cmd_list]
+                
+                # 3. 尝试提取任何看起来像任务的字符串
+                tasks = re.findall(r'\[(.*?)\]', cleaned_content)
+                if tasks:
+                    # 提取数组中的字符串
+                    task_list = re.findall(r'"([^"]+)"', tasks[0])
+                    if task_list:
+                        return task_list
+                
+                # 4. 最后尝试，直接匹配引号中的内容，排除常见的JSON键名
+                tasks = re.findall(r'"([^"]+)"', cleaned_content)
+                if tasks:
+                    # 过滤掉常见的JSON键名
+                    filtered_tasks = [task for task in tasks if task.lower() not in ['tasks', 'task', 'steps', 'step']]
+                    if filtered_tasks:
+                        return filtered_tasks
+            except Exception as parse_error:
+                print(f"额外解析尝试失败: {str(parse_error)}")
+            
+            # 所有方法都失败，将整个请求作为一个任务
+            return [user_request]
 
     async def connect_to_server(self) -> bool:
         """

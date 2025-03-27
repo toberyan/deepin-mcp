@@ -33,6 +33,31 @@ def sanitize_args(args: List[str]) -> List[str]:
     # 不进行过滤，允许所有参数通过
     return args
 
+def is_gui_application(command: str, args: List[str] = None) -> bool:
+    """
+    判断命令是否为图形界面应用
+    
+    Args:
+        command: 命令名称
+        args: 命令参数
+        
+    Returns:
+        bool: 是否为图形界面应用
+    """
+    # 定义已知的图形界面应用列表
+    gui_commands = ['xdg-open', 'gnome-open', 'kde-open', 'firefox', 'chromium', 'eog', 'display', 
+                  'evince', 'okular', 'libreoffice', 'gimp', 'vlc', 'mpv', 'gedit', 'nautilus', 'thunar']
+    
+    # 基础判断：命令本身是否在图形界面应用列表中
+    if command in gui_commands or any(cmd in command for cmd in gui_commands):
+        return True
+    
+    # 特别处理xdg-open命令，无论文件类型都以GUI方式运行
+    if command == 'xdg-open' or command.startswith('xdg-open '):
+        return True
+        
+    return False
+
 async def execute_bash_command(command: str, args: List[str], timeout: int = 30) -> Dict[str, Union[int, str, str]]:
     """
     执行bash命令
@@ -47,6 +72,10 @@ async def execute_bash_command(command: str, args: List[str], timeout: int = 30)
     """
     # 清理参数
     safe_args = sanitize_args(args)
+    
+    # 展开命令中的波浪号（~）为用户主目录
+    if command.startswith('~'):
+        command = os.path.expanduser(command)
     
     # 展开参数中的波浪号（~）为用户主目录
     expanded_args = []
@@ -67,11 +96,8 @@ async def execute_bash_command(command: str, args: List[str], timeout: int = 30)
     if 'DISPLAY' not in user_env:
         user_env['DISPLAY'] = ':0'
     
-    # 判断是否为图形界面相关命令
-    gui_commands = ['xdg-open', 'gnome-open', 'kde-open', 'firefox', 'chromium', 'eog', 'display', 
-                  'evince', 'okular', 'libreoffice', 'gimp', 'vlc', 'mpv', 'gedit', 'nautilus', 'thunar']
-    
-    is_gui_command = command in gui_commands or any(cmd in command for cmd in gui_commands)
+    # 使用通用函数判断是否为图形界面命令
+    is_gui_command = is_gui_application(command, expanded_args)
     
     # 如果是图形界面相关命令，确保设置相关环境变量
     if is_gui_command:
@@ -158,11 +184,36 @@ async def run_bash(command: str, args: str = "", use_shell: bool = False) -> str
     if 'DISPLAY' not in user_env:
         user_env['DISPLAY'] = ':0'
     
-    # 判断是否为图形界面相关命令
-    gui_commands = ['xdg-open', 'gnome-open', 'kde-open', 'firefox', 'chromium', 'eog', 'display', 
-                   'evince', 'okular', 'libreoffice', 'gimp', 'vlc', 'mpv', 'gedit', 'nautilus', 'thunar']
+    # 处理命令中的波浪号(~)
+    if not use_shell and command.startswith('~'):
+        command = os.path.expanduser(command)
     
-    is_gui_command = command in gui_commands or any(cmd in command for cmd in gui_commands)
+    # 处理命令可能包含参数的情况
+    cmd_parts = shlex.split(command) if ' ' in command and not args else [command]
+    cmd_name = cmd_parts[0]
+    cmd_args = cmd_parts[1:] if len(cmd_parts) > 1 else []
+    
+    # 为非shell模式的cmd_name处理波浪号
+    if not use_shell and cmd_name.startswith('~'):
+        cmd_name = os.path.expanduser(cmd_name)
+    
+    # 解析参数字符串为列表
+    if args:
+        arg_list = shlex.split(args)
+        cmd_args.extend(arg_list)
+    
+    # 在非shell模式下处理参数中的波浪号(~)
+    if not use_shell:
+        processed_args = []
+        for arg in cmd_args:
+            if arg.startswith('~'):
+                processed_args.append(os.path.expanduser(arg))
+            else:
+                processed_args.append(arg)
+        cmd_args = processed_args
+    
+    # 使用通用函数判断是否为图形界面命令
+    is_gui_command = is_gui_application(cmd_name, cmd_args)
     
     # 如果是图形界面相关命令，确保设置相关环境变量
     if is_gui_command:
@@ -227,20 +278,12 @@ async def run_bash(command: str, args: str = "", use_shell: bool = False) -> str
             return f"错误: {str(e)}"
     
     # 非shell模式处理
-    # 处理命令可能包含参数的情况
-    if " " in command and not args:
-        command_parts = shlex.split(command)
-        command = command_parts[0]
-        args = " ".join(command_parts[1:])
-    
-    # 解析参数字符串为列表
-    arg_list = shlex.split(args) if args else []
     
     # 对于图形界面命令使用分离进程的方式执行
     if is_gui_command:
         try:
             # 构建完整命令
-            cmd = [command] + arg_list
+            cmd = [cmd_name] + cmd_args
             
             # 使用分离进程的方式启动
             subprocess.Popen(
@@ -251,13 +294,13 @@ async def run_bash(command: str, args: str = "", use_shell: bool = False) -> str
                 start_new_session=True
             )
             
-            return f"已启动图形界面命令: {command} {args}\n\n命令已在后台运行，不会阻塞当前会话。"
+            return f"已启动图形界面命令: {cmd_name} {' '.join(cmd_args)}\n\n命令已在后台运行，不会阻塞当前会话。"
             
         except Exception as e:
             return f"启动图形界面命令失败: {str(e)}"
     
     # 非图形界面命令，按原方式执行
-    result = await execute_bash_command(command, arg_list)
+    result = await execute_bash_command(cmd_name, cmd_args)
     
     # 格式化输出
     output = []
@@ -347,11 +390,8 @@ async def get_command_help(command: str) -> str:
     if 'DISPLAY' not in user_env:
         user_env['DISPLAY'] = ':0'
     
-    # 判断是否为图形界面相关命令
-    gui_commands = ['xdg-open', 'gnome-open', 'kde-open', 'firefox', 'chromium', 'eog', 'display', 
-                  'evince', 'okular', 'libreoffice', 'gimp', 'vlc', 'mpv', 'gedit', 'nautilus', 'thunar']
-    
-    is_gui_command = command in gui_commands or any(cmd in command for cmd in gui_commands)
+    # 使用通用函数判断是否为图形界面命令
+    is_gui_command = is_gui_application(command)
     
     # 如果是图形界面相关命令，确保设置相关环境变量
     if is_gui_command:
