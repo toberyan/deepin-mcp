@@ -2,7 +2,9 @@ import asyncio
 import os
 import sys
 import json
-from typing import List, Dict
+import glob
+import subprocess
+from typing import List, Dict, Optional
 from pathlib import Path
 
 from openai import OpenAI
@@ -31,21 +33,171 @@ class TaskPlanner:
         # 初始化MCP客户端
         self.mcp_client = MCPClient()
         
-        # 找到bash_server.py的路径
-        self.server_paths = [
-            "bash_server.py",
-            "servers/bash_server.py",
-            Path(__file__).parent / "bash_server.py",
-            Path(__file__).parent / "servers" / "bash_server.py"
-        ]
-        self.server_path = None
-        for path in self.server_paths:
-            if Path(path).exists():
-                self.server_path = str(Path(path).resolve())
-                break
+        # 查找可用的服务器脚本
+        self.available_servers = self.find_available_servers()
+        self.server_path = self.get_default_server_path()
         
         if not self.server_path:
-            raise FileNotFoundError("找不到bash_server.py文件")
+            raise FileNotFoundError("找不到任何可用的服务器脚本")
+
+    def find_available_servers(self) -> Dict[str, str]:
+        """
+        查找所有可用的服务器脚本
+        
+        Returns:
+            Dict[str, str]: 服务器名称到路径的映射
+        """
+        server_paths = {}
+        
+        # 检查是否在打包环境中运行
+        is_packaged = getattr(sys, 'frozen', False)
+        
+        # 获取可能的搜索路径
+        search_paths = []
+        
+        # 1. 当前工作目录及其servers子目录
+        search_paths.extend([
+            "*.py",
+            "servers/*.py"
+        ])
+        
+        # 2. 脚本所在目录及其servers子目录
+        script_dir = Path(sys.argv[0]).resolve().parent
+        search_paths.extend([
+            str(script_dir / "*.py"),
+            str(script_dir / "servers" / "*.py")
+        ])
+        
+        # 3. 可执行文件所在目录（针对PyInstaller打包的应用）
+        if is_packaged:
+            executable_dir = Path(sys.executable).resolve().parent
+            search_paths.extend([
+                str(executable_dir / "*.py"),
+                str(executable_dir / "servers" / "*.py")
+            ])
+            
+            # 在打包环境中添加对包装器脚本的搜索
+            search_paths.extend([
+                str(executable_dir / "servers" / "*.wrapper.py")
+            ])
+        
+        # 搜索所有路径
+        for pattern in search_paths:
+            for server_path in glob.glob(pattern):
+                server_file = Path(server_path)
+                
+                # 跳过主程序文件、客户端文件等
+                if server_file.name in ['main.py', 'client.py', '__init__.py', '__main__.py']:
+                    continue
+                
+                # 获取服务器名称
+                if server_file.name.endswith('.wrapper.py'):
+                    # 对于包装器脚本，去除.wrapper.py后缀
+                    orig_name = server_file.name[:-11]  # 移除".wrapper.py"
+                    server_name = orig_name
+                    if server_name.endswith('_server'):
+                        server_name = server_name[:-7]  # 移除"_server"
+                else:
+                    # 对于常规脚本，检查文件名是否包含"server"
+                    if "server" in server_file.name.lower():
+                        server_name = server_file.stem
+                        if server_name.endswith('_server'):
+                            server_name = server_name[:-7]  # 移除"_server"
+                    else:
+                        continue  # 不是服务器脚本
+                
+                # 将路径添加到可用服务器列表
+                server_paths[server_name] = str(server_file.resolve())
+        
+        # 如果在打包环境中运行，优先使用包装器脚本
+        if is_packaged:
+            run_server_script = None
+            for root in [Path(sys.executable).resolve().parent, Path.cwd()]:
+                script_path = root / "run_server.sh"
+                if script_path.exists():
+                    run_server_script = str(script_path)
+                    break
+            
+            if run_server_script:
+                # 如果找到run_server.sh，替换所有路径为使用它的命令
+                updated_paths = {}
+                for name, path in server_paths.items():
+                    if path.endswith('.wrapper.py'):
+                        # 已经是包装器脚本，保持不变
+                        updated_paths[name] = path
+                    else:
+                        # 使用run_server.sh脚本
+                        server_file = Path(path).name
+                        updated_paths[name] = f"{run_server_script} {server_file}"
+                
+                # 使用更新后的路径
+                if updated_paths:
+                    server_paths = updated_paths
+        
+        return server_paths
+
+    def get_default_server_path(self) -> Optional[str]:
+        """
+        获取默认服务器路径，优先使用bash_server
+        
+        Returns:
+            Optional[str]: 默认服务器路径
+        """
+        # 优先使用bash_server
+        if 'bash' in self.available_servers:
+            return self.available_servers['bash']
+        
+        # 如果没有bash_server，使用第一个可用的服务器
+        if self.available_servers:
+            return next(iter(self.available_servers.values()))
+        
+        return None
+
+    def list_available_servers(self) -> List[str]:
+        """
+        列出所有可用的服务器
+        
+        Returns:
+            List[str]: 可用服务器名称列表
+        """
+        return list(self.available_servers.keys())
+
+    def set_server(self, server_name: str) -> bool:
+        """
+        设置要使用的服务器
+        
+        Args:
+            server_name: 服务器名称或路径
+            
+        Returns:
+            bool: 是否成功设置
+        """
+        # 检查是否是已知的服务器名称
+        if server_name in self.available_servers:
+            self.server_path = self.available_servers[server_name]
+            return True
+        
+        # 检查是否是路径而非名称
+        if os.path.exists(server_name):
+            self.server_path = str(Path(server_name).resolve())
+            return True
+        
+        # 检查是否在打包环境中运行
+        if getattr(sys, 'frozen', False):
+            # 尝试查找run_server.sh脚本
+            run_server_script = None
+            for root in [Path(sys.executable).resolve().parent, Path.cwd()]:
+                script_path = root / "run_server.sh"
+                if script_path.exists():
+                    run_server_script = str(script_path)
+                    break
+            
+            if run_server_script:
+                # 尝试使用服务器名称构造run_server.sh命令
+                self.server_path = f"{run_server_script} {server_name}"
+                return True
+            
+        return False
 
     async def plan_tasks(self, user_request: str) -> List[str]:
         """
@@ -105,11 +257,15 @@ class TaskPlanner:
                     return filtered_tasks
             return [user_request]  # 如果解析失败，将整个请求作为一个任务
 
-    async def connect_to_server(self):
-        """连接到MCP服务器"""
+    async def connect_to_server(self) -> bool:
+        """
+        连接到MCP服务器
+        
+        Returns:
+            bool: 连接是否成功
+        """
         try:
             await self.mcp_client.connect_to_server(self.server_path)
-            print(f"\n已成功连接到服务器: {self.server_path}")
             return True
         except Exception as e:
             print(f"\n连接服务器失败: {str(e)}")

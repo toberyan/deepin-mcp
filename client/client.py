@@ -70,18 +70,36 @@ class MCPClient:
         
     async def connect_to_server(self, server_script_path: str):
         """连接到服务器"""
-        is_python = server_script_path.endswith(".py")
-        is_js = server_script_path.endswith(".js")
-        
-        if not (is_python or is_js):
-            raise ValueError(f"\n服务器脚本必须是Python或JavaScript文件")
-        
-        command = "python" if is_python else "node"
-        server_params = StdioServerParameters(
-            command=command,
-            args=[server_script_path],
-            env=None
-        )
+        # 检查是否是shell命令（来自run_server.sh脚本）
+        if server_script_path.endswith("run_server.sh") or " " in server_script_path:
+            # 如果是shell命令，直接使用命令运行
+            command_parts = server_script_path.split()
+            if len(command_parts) > 1:
+                command = command_parts[0]  # 脚本路径
+                args = command_parts[1:]    # 参数
+            else:
+                command = server_script_path
+                args = []
+                
+            server_params = StdioServerParameters(
+                command=command,
+                args=args,
+                env=None
+            )
+        else:
+            # 正常的Python或JS文件处理
+            is_python = server_script_path.endswith(".py") or server_script_path.endswith(".wrapper.py")
+            is_js = server_script_path.endswith(".js")
+            
+            if not (is_python or is_js):
+                raise ValueError(f"\n服务器脚本必须是Python或JavaScript文件")
+            
+            command = "python" if is_python else "node"
+            server_params = StdioServerParameters(
+                command=command,
+                args=[server_script_path],
+                env=None
+            )
         
         # 创建stdio客户端
         stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
@@ -91,7 +109,6 @@ class MCPClient:
         await self.session.initialize()
         
         # 获取服务器信息
-        print(f"\n成功连接到服务器")
         
         # 获取工具列表
         response = await self.session.list_tools()

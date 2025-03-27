@@ -9,6 +9,7 @@ This MCP client allows you to:
 2. List and use available tools from the server
 3. Interact with the server using natural language queries
 4. Process responses with OpenAI's language models
+5. Plan and execute complex tasks automatically
 
 ## Setup
 
@@ -117,7 +118,7 @@ echo "MODEL=gpt-3.5-turbo" >> .env
 uv run python client.py servers/bash_server.py
 
 # Or run the task planning system
-uv run python planning.py
+uv run python main.py
 ```
 
 ### Basic Usage
@@ -146,7 +147,7 @@ uv run python client.py path/to/your/server_script.js
 
 ### Task Planning System
 
-The project includes a powerful task planning system (`planning.py`) that can:
+The project includes a powerful task planning system that can:
 1. Break down complex user requests into sequential tasks
 2. Execute tasks automatically using the MCP server
 3. Provide detailed execution summaries
@@ -154,19 +155,65 @@ The project includes a powerful task planning system (`planning.py`) that can:
 To use the task planning system:
 
 ```bash
-python planning.py
+python main.py
 ```
 
 Or using UV (recommended):
 ```bash
-uv run python planning.py
+uv run python main.py
+```
+
+You can also specify a custom server path:
+
+```bash
+python main.py --server path/to/your/server_script.py
+```
+
+Or check the version information:
+
+```bash
+python main.py --version
+```
+
+### Main Entry Point
+
+The project provides a main entry point (`main.py`) that serves as the centralized entry point for the application:
+
+```bash
+python main.py
+```
+
+Or using UV (recommended):
+```bash
+uv run python main.py
+```
+
+The main entry point:
+- Initializes the task planning system
+- Provides version information and system description
+- Handles exceptions gracefully
+- Makes the application more user-friendly
+- Allows specifying custom server paths with the `--server` option
+
+Example usage:
+```
+$ python main.py
+
+====== Deepin MCP 任务规划系统 ======
+版本: 1.0.0
+描述: 这是一个基于MCP协议的任务规划执行系统
+======================================
+
+欢迎使用任务规划执行系统
+这个系统会将您的请求拆解为多个任务，并依次执行
+
+已成功连接到服务器: /home/user/deepin-mcp-python/servers/bash_server.py
+
+请输入您的请求 (输入'quit'退出): 
 ```
 
 Example interaction:
 ```
-Welcome to the Task Planning System
-This system will break down your request into multiple tasks and execute them sequentially
-
 请输入您的请求 (输入'quit'退出): Create a new directory called 'projects' and copy all .txt files from 'documents' to it
 
 正在分析您的请求...
@@ -266,7 +313,9 @@ To extend or modify this client:
 
 1. The `MCPClient` class handles the main functionality
 2. The `process_query` method processes queries using the LLM
-3. Error handling is implemented throughout for robustness
+3. The `TaskPlanner` class breaks down complex requests into tasks
+4. The main entry point (`main.py`) provides a user-friendly interface
+5. Error handling is implemented throughout for robustness
 
 ## Troubleshooting
 
@@ -275,7 +324,166 @@ If you encounter issues:
 2. Verify the server script path is correct
 3. Ensure the server implements the MCP protocol correctly
 4. Check console output for error messages
+5. Make sure you have required dependencies installed
 
 ## License
 
 This project is available under the MIT License.
+
+### Building Executable Binary
+
+You can build a standalone binary executable that can be distributed without requiring Python installation:
+
+#### Using the Build Script
+
+The project includes a build script that simplifies the process:
+
+```bash
+# Make the build script executable
+chmod +x build.sh
+
+# Run the build script
+./build.sh
+```
+
+The executable will be created in the `dist` directory as `deepin-mcp`.
+
+#### Manual Build Process
+
+If you prefer to build manually:
+
+1. Install PyInstaller using UV:
+   ```bash
+   uv pip install pyinstaller
+   ```
+
+2. Build the executable:
+   ```bash
+   pyinstaller --clean deepin-mcp.spec
+   ```
+
+3. The executable will be available at `dist/deepin-mcp`
+
+#### Running the Executable
+
+Once built, you can run the executable directly:
+
+```bash
+# Run with default settings
+./dist/deepin-mcp
+
+# Check version
+./dist/deepin-mcp --version
+
+# Specify a custom server
+./dist/deepin-mcp --server path/to/your/server_script.py
+```
+
+The executable includes all necessary dependencies and can be distributed to systems without Python installed.
+
+### Server Discovery and Selection
+
+The application automatically discovers and loads available server scripts:
+
+1. When starting the application, it searches for server scripts in these locations:
+   - The current working directory
+   - The `servers` subdirectory
+   - The application's executable directory
+   - The `servers` subdirectory within the executable directory
+
+2. Available servers can be listed with:
+   ```bash
+   ./deepin-mcp --list-servers
+   ```
+
+3. A specific server can be selected at startup:
+   ```bash
+   ./deepin-mcp --server bash
+   # or by path
+   ./deepin-mcp --server /path/to/custom_server.py
+   ```
+
+4. Servers can be switched during runtime by typing `switch` at the prompt.
+
+### Server Deployment
+
+When the application is packaged as a binary executable:
+
+1. Server scripts are automatically deployed to the `servers` directory next to the executable
+2. The application automatically finds and loads these servers
+3. Each server is accompanied by a wrapper script (e.g., `bash_server.wrapper.py`) that ensures proper dependency loading
+4. A dedicated Python environment with all necessary dependencies (including the `mcp` module) is created in the `server_env` directory
+5. Custom servers can be added by placing them in the `servers` directory with a filename containing "server" (e.g., `custom_server.py`)
+6. The `run_server.sh` helper script can be used to directly run any server
+
+#### Running Servers Directly
+
+You can run servers directly using the provided helper script:
+
+```bash
+# Run a server by name
+./dist/deepin-mcp/run_server.sh bash
+
+# Run a server by file name
+./dist/deepin-mcp/run_server.sh bash_server.py
+
+# Run a server by full path
+./dist/deepin-mcp/run_server.sh /path/to/your/custom_server.py
+```
+
+This is particularly useful for:
+- Testing server functionality independently
+- Running servers in separate terminals
+- Using custom server scripts with the application
+
+#### Server Environment Structure
+
+The packaged application includes a complete environment for the servers:
+
+```
+dist/deepin-mcp/
+├── deepin-mcp          # Main executable
+├── run_server.sh       # Server helper script
+├── server_env/         # Python environment for servers
+│   ├── mcp/            # MCP module and dependencies
+│   ├── openai/         # OpenAI module
+│   └── ...             # Other dependencies
+└── servers/
+    ├── bash_server.py          # Original server script
+    ├── bash_server.wrapper.py  # Wrapper that configures path
+    ├── file_server.py          # Original server script
+    ├── file_server.wrapper.py  # Wrapper that configures path
+    └── ...
+```
+
+#### Adding Custom Servers
+
+To add custom servers to a packaged application:
+
+1. Create your server script following the MCP protocol
+2. Place it in the `servers` directory of the packaged application
+3. Create a wrapper script that follows the same pattern as the included wrappers, or run the following command inside the dist/deepin-mcp directory:
+
+```bash
+cat > servers/myserver_server.wrapper.py << EOF
+#!/usr/bin/env python
+# Wrapper script for myserver_server.py
+import os
+import sys
+
+# Add the server_env to the Python path
+server_env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'server_env'))
+sys.path.insert(0, server_env_path)
+
+# Import the actual server code
+server_file = os.path.abspath(os.path.join(os.path.dirname(__file__), 'myserver_server.py'))
+with open(server_file, 'r') as f:
+    server_code = f.read()
+
+# Execute the server code with the modified path
+exec(server_code)
+EOF
+chmod +x servers/myserver_server.wrapper.py
+```
+
+4. Run your custom server with the helper script or use it directly from the main application
