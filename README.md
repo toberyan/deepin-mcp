@@ -25,7 +25,7 @@ UV is a fast, reliable Python package installer and resolver. It's recommended f
 1. Install UV:
    ```bash
    # Unix (macOS, Linux)
-   curl -sSf https://astral.sh/uv/install.sh | bash
+   curl -LsSf https://astral.sh/uv/install.sh | bash
 
    # Windows (PowerShell)
    irm https://astral.sh/uv/install.ps1 | iex
