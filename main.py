@@ -359,7 +359,7 @@ async def main():
         
         # 启动API服务器
         config = uvicorn.Config(
-            app="main:app", 
+            app=app, 
             host=host, 
             port=port, 
             log_level="info",
