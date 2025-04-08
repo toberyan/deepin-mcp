@@ -64,65 +64,10 @@ EOF
     chmod +x "$wrapper_path"
 done
 
-# Create a bash helper script to run the servers
-cat > dist/deepin-mcp/run_server.sh << 'EOF'
-#!/bin/bash
-# Helper script to run a server with the correct environment
-SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-SERVER_NAME="$1"
-PYTHON_EXECUTABLE="$(command -v python)"
-
-if [[ "$SERVER_NAME" == *".py" ]]; then
-    # Full path or filename provided
-    if [[ "$SERVER_NAME" == *"/"* ]]; then
-        # Full path provided
-        SERVER_PATH="$SERVER_NAME"
-    else
-        # Just filename provided
-        SERVER_PATH="$SCRIPT_DIR/servers/$SERVER_NAME"
-    fi
-else
-    # Just server name provided without .py extension
-    if [ -f "$SCRIPT_DIR/servers/${SERVER_NAME}_server.wrapper.py" ]; then
-        SERVER_PATH="$SCRIPT_DIR/servers/${SERVER_NAME}_server.wrapper.py"
-    elif [ -f "$SCRIPT_DIR/servers/${SERVER_NAME}.wrapper.py" ]; then
-        SERVER_PATH="$SCRIPT_DIR/servers/${SERVER_NAME}.wrapper.py"
-    else
-        echo "Server $SERVER_NAME not found"
-        exit 1
-    fi
-fi
-
-# Check if wrapper exists, if not use the .py file
-WRAPPER_PATH="${SERVER_PATH%.py}.wrapper.py"
-if [ -f "$WRAPPER_PATH" ]; then
-    SERVER_PATH="$WRAPPER_PATH"
-fi
-
-# Execute the server with correct Python
-echo "Running server: $SERVER_PATH"
-$PYTHON_EXECUTABLE "$SERVER_PATH"
-EOF
-
-chmod +x dist/deepin-mcp/run_server.sh
-
 # Make the executable file executable
 echo "Making files executable..."
 chmod +x dist/deepin-mcp/deepin-mcp
 
-# Create a simple wrapper script for easier execution
-echo "Creating wrapper script..."
-cat > dist/run-deepin-mcp.sh << 'EOF'
-#!/bin/bash
-# Run the deepin-mcp application from its directory
-cd "$(dirname "$0")/deepin-mcp"
-./deepin-mcp "$@"
-EOF
-
-chmod +x dist/run-deepin-mcp.sh
-
 # Display success message
 echo "Build completed successfully."
-echo "The executable is available at: dist/deepin-mcp/deepin-mcp"
-echo "For easier use, run: ./dist/run-deepin-mcp.sh"
-echo "To run a server directly, use: ./dist/deepin-mcp/run_server.sh <server_name>" 
+echo "The executable is available at: dist/deepin-mcp/deepin-mcp" 
