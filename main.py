@@ -58,20 +58,22 @@ async def lifespan(app: FastAPI):
     # 启动时初始化TaskPlanner
     global planner
     try:
-        load_dotenv()
-        planner = TaskPlanner()
-        # 使用默认服务器路径
-        connected = await planner.connect_to_server()
-        if not connected:
-            print("\n无法连接到服务器，程序可能无法正常运行")
+        # 只有当全局planner未初始化时才进行初始化
+        if planner is None:
+            load_dotenv()
+            planner = TaskPlanner()
+            # 使用默认服务器路径或启用的服务器
+            connected = await planner.connect_to_server()
+            if not connected:
+                print("\n无法连接到服务器，程序可能无法正常运行")
     except Exception as e:
         print(f"\n初始化过程中出现错误: {str(e)}")
     
     yield
     
-    # 关闭时清理资源
-    if planner:
-        await planner.cleanup()
+    # 关闭时不清理资源，因为主程序会负责清理
+    # 避免重复清理导致的问题
+    pass
 
 # 创建FastAPI应用
 app = FastAPI(lifespan=lifespan)
@@ -242,296 +244,473 @@ async def stream_completion(user_request: str, model: str):
         # 取消订阅
         output_capture.unsubscribe(sub_id)
 
-async def main():
-    """
-    主入口函数，初始化并运行任务规划系统
-    """
-    parser = argparse.ArgumentParser(description="Deepin MCP 任务规划系统")
-    parser.add_argument("--server", "-s", type=str, help="指定MCP服务器脚本路径或名称", default=None)
-    parser.add_argument("--list-servers", "-l", action="store_true", help="列出所有可用的服务器")
-    parser.add_argument("--version", "-v", action="store_true", help="显示版本信息")
-    parser.add_argument("--api-server", "-a", action="store_true", help="启动OpenAI兼容的API服务器")
-    parser.add_argument("--cli", "-c", action="store_true", help="以CLI模式启动（不启动API服务器）")
-    parser.add_argument("--port", "-p", type=int, default=0, help="API服务器端口号，0表示自动选择随机端口")
-    parser.add_argument("--host", type=str, default="127.0.0.1", help="API服务器主机地址")
-    args = parser.parse_args()
+def parse_arguments():
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(description='Deepin MCP 任务规划系统')
+    parser.add_argument('--port', type=int, help='API服务器端口号')
+    parser.add_argument('--host', type=str, default='127.0.0.1', help='API服务器主机地址')
+    parser.add_argument('--cli', action='store_true', help='仅使用命令行界面，不启动API服务器')
+    parser.add_argument('--query', type=str, help='CLI模式下直接执行的查询')
+    parser.add_argument('--list-servers', action='store_true', help='列出所有可用的服务器')
+    parser.add_argument('--server', type=str, help='指定要使用的服务器名称')
+    parser.add_argument('--enable-server', type=str, help='启用指定的服务器')
+    parser.add_argument('--disable-server', type=str, help='禁用指定的服务器')
+    parser.add_argument('--set-default', type=str, help='设置默认服务器')
+    parser.add_argument('--version', action='version', version=f'Deepin MCP {VERSION}')
+    return parser.parse_args()
 
-    # 显示版本信息并退出
-    if args.version:
-        print(f"Deepin MCP 任务规划系统 v{VERSION}")
-        return
-
-    # 加载环境变量
-    load_dotenv()
+async def run_cli_mode(query=None):
+    """运行CLI模式"""
+    global planner
     
-    # 在启动时自动启动API服务器（除非明确要求CLI模式或列出服务器或版本信息）
-    if not args.cli and not args.list_servers and not args.version:
-        args.api_server = True
-
-    # 如果启动API服务器
-    if args.api_server:
-        # 加载环境变量中的端口和主机配置（如果存在）
-        env_port = os.getenv('MCP_API_PORT')
-        env_host = os.getenv('MCP_API_HOST')
-        
-        print(f"\n====== Deepin MCP OpenAI兼容API服务器 ======")
-        print(f"版本: {VERSION}")
-        print(f"正在启动服务器...")
-        
-        # 优先使用命令行参数指定的端口
-        if args.port > 0:
-            port = args.port
-            print(f"使用命令行指定的端口: {port}")
-        # 其次使用环境变量中的端口
-        elif env_port and env_port.isdigit() and int(env_port) > 0:
-            port = int(env_port)
-            print(f"使用.env文件中的端口配置: {port}")
-        # 最后才使用随机端口
-        else:
-            port = 0
-            print("未指定端口，将自动选择随机端口")
-        
-        # 优先使用命令行参数指定的主机
-        if args.host != "127.0.0.1":
-            host = args.host
-            print(f"使用命令行指定的主机地址: {host}")
-        elif env_host:
-            host = env_host
-            print(f"使用.env文件中的主机配置: {host}")
-        else:
-            host = "127.0.0.1"
-            print(f"使用默认主机地址: {host}")
-        
-        # 创建一个socket来找到可用端口（如果指定了随机端口）
-        if port == 0:
-            import socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.bind(('', 0))
-            port = sock.getsockname()[1]
-            sock.close()
-        
-        # 将端口保存到环境变量中
-        os.environ['MCP_API_PORT'] = str(port)
-        os.environ['MCP_API_HOST'] = host
-        
-        # 将端口写入.env文件
+    if query:
+        # 直接执行指定查询
+        print(f"\n执行查询: {query}")
         try:
-            env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
-            if os.path.exists(env_file):
-                # 读取现有内容
-                with open(env_file, 'r') as f:
-                    env_content = f.readlines()
-                
-                # 更新或添加端口设置
-                found_port = False
-                found_host = False
-                for i, line in enumerate(env_content):
-                    if line.startswith('MCP_API_PORT='):
-                        env_content[i] = f'MCP_API_PORT={port}\n'
-                        found_port = True
-                    elif line.startswith('MCP_API_HOST='):
-                        env_content[i] = f'MCP_API_HOST={host}\n'
-                        found_host = True
-                
-                if not found_port:
-                    env_content.append(f'MCP_API_PORT={port}\n')
-                if not found_host:
-                    env_content.append(f'MCP_API_HOST={host}\n')
-                
-                # 写回文件
-                with open(env_file, 'w') as f:
-                    f.writelines(env_content)
-            else:
-                # 创建新文件
-                with open(env_file, 'a') as f:
-                    f.write(f'MCP_API_PORT={port}\n')
-                    f.write(f'MCP_API_HOST={host}\n')
+            # 规划任务
+            tasks = await planner.plan_tasks(query)
             
-            print(f"API服务器配置已保存到 {env_file}")
+            if not tasks:
+                print("\n未能从请求中提取出具体任务，请尝试更明确的描述")
+                return
+                
+            print(f"\n已将请求拆解为 {len(tasks)} 个任务:")
+            for i, task in enumerate(tasks, 1):
+                print(f"{i}. {task}")
+                
+            # 执行任务
+            results = await planner.execute_tasks(tasks)
+            
+            # 生成总结
+            print("\n所有任务已执行完毕，正在生成总结...")
+            summary = await planner.summarize_results(query, tasks, results)
+            
+            print("\n执行总结:")
+            print(summary)
         except Exception as e:
-            print(f"无法写入配置到.env文件: {str(e)}")
+            print(f"\n执行过程中出现错误: {str(e)}")
+            traceback_str = traceback.format_exc()
+            print(traceback_str)
+    else:
+        # 进入交互式模式
+        await interactive_mode(planner)
+
+async def start_api_server(port: Optional[int], host: str):
+    """启动OpenAI兼容的API服务器"""
+    # 查找可用端口
+    if port is None:
+        port = int(os.getenv("MCP_API_PORT", "0"))
+        if port == 0:
+            # 查找随机可用端口
+            import socket
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('', 0))
+                port = s.getsockname()[1]
+    
+    if not host:
+        host = os.getenv("MCP_API_HOST", "127.0.0.1")
+    
+    print(f"\n====== Deepin MCP OpenAI兼容API服务器 ======")
+    print(f"版本: {VERSION}")
+    print(f"正在启动服务器...")
+    print(f"已选择端口: {port}")
+    print(f"服务器地址: http://{host}:{port}")
+    print(f"OpenAI客户端连接URL: http://{host}:{port}/v1")
+    print(f"环境变量: MCP_API_PORT={port}")
+    print(f"======================================")
+    
+    # 更新环境变量
+    os.environ["MCP_API_PORT"] = str(port)
+    os.environ["MCP_API_HOST"] = host
+    
+    # 将端口和主机保存到.env文件
+    try:
+        # 读取现有.env文件内容
+        env_content = []
+        if os.path.exists(".env"):
+            with open(".env", "r") as f:
+                env_content = f.readlines()
         
-        print(f"已选择端口: {port}")
-        print(f"服务器地址: http://{host}:{port}")
-        print(f"OpenAI客户端连接URL: http://{host}:{port}/v1")
-        print(f"环境变量: MCP_API_PORT={port}")
-        print(f"=======================================")
+        # 检查是否已存在配置项
+        port_exists = False
+        host_exists = False
+        for i, line in enumerate(env_content):
+            if line.startswith("MCP_API_PORT="):
+                env_content[i] = f"MCP_API_PORT={port}\n"
+                port_exists = True
+            elif line.startswith("MCP_API_HOST="):
+                env_content[i] = f"MCP_API_HOST={host}\n"
+                host_exists = True
         
+        # 如果不存在，则添加
+        if not port_exists:
+            env_content.append(f"MCP_API_PORT={port}\n")
+        if not host_exists:
+            env_content.append(f"MCP_API_HOST={host}\n")
+        
+        # 写回文件
+        with open(".env", "w") as f:
+            f.writelines(env_content)
+            
+        print(f"API服务器配置已保存到.env文件")
+    except Exception as e:
+        print(f"保存配置到.env文件时出错: {str(e)}")
+        print(f"这不会影响程序运行，但下次启动时可能使用不同的端口")
+    
+    try:
         # 启动API服务器
         config = uvicorn.Config(
             app=app, 
             host=host, 
             port=port, 
             log_level="info",
-            log_config=None  # 禁用默认日志配置，避免formatter错误
+            log_config=None,  # 禁用默认日志配置，避免formatter错误
+            timeout_keep_alive=60  # 保持连接的超时时间（秒）
         )
         server = uvicorn.Server(config)
+        
+        # 注册自定义的信号处理程序
+        import signal
+        
+        # 保存原来的信号处理程序
+        original_handler = signal.getsignal(signal.SIGINT)
+        
+        def graceful_shutdown(sig, frame):
+            print("\n正在优雅关闭服务器...")
+            # 服务器将在下一次事件循环迭代时停止
+            # 不在信号处理程序中执行任何异步操作
+            
+            # 恢复原来的信号处理程序，这样连续两次 Ctrl+C 将立即终止
+            signal.signal(signal.SIGINT, original_handler)
+        
+        # 替换SIGINT信号处理程序
+        signal.signal(signal.SIGINT, graceful_shutdown)
+        
+        # 使用任务包装器启动服务器
         await server.serve()
-        return
+    except Exception as e:
+        print(f"API服务器运行出错: {str(e)}")
+    except KeyboardInterrupt:
+        print("\n检测到键盘中断，正在关闭服务器...")
+    finally:
+        print("API服务器已停止")
 
-    # 初始化任务规划器
+async def main_async():
+    """异步主函数"""
+    args = parse_arguments()
+    global planner
+    
     try:
+        # 初始化环境变量
+        load_dotenv()
+        
+        # 处理服务器管理命令
+        if args.list_servers or args.enable_server or args.disable_server or args.set_default:
+            # 创建TaskPlanner实例用于服务器管理
+            temp_planner = TaskPlanner()
+            
+            if args.list_servers:
+                await list_servers(temp_planner)
+                return
+                
+            if args.enable_server:
+                temp_planner.enable_server(args.enable_server)
+                print(f"\n已启用服务器: {args.enable_server}")
+                return
+                
+            if args.disable_server:
+                temp_planner.disable_server(args.disable_server)
+                print(f"\n已禁用服务器: {args.disable_server}")
+                return
+                
+            if args.set_default:
+                temp_planner.set_default_server(args.set_default)
+                print(f"\n已将 {args.set_default} 设置为默认服务器")
+                return
+        
+        # 创建TaskPlanner实例
         planner = TaskPlanner()
         
-        # 如果请求列出所有服务器
-        if args.list_servers:
-            servers = planner.list_available_servers()
-            if servers:
-                print("\n可用的服务器:")
-                for i, server in enumerate(servers, 1):
-                    print(f"{i}. {server} ({planner.available_servers[server]})")
-                print(f"\n默认服务器: {Path(planner.server_path).stem}")
-            else:
-                print("\n未找到可用的服务器")
-            return
-        
-        # 连接服务器，优先使用命令行参数指定的服务器
+        # 连接服务器
         if args.server:
-            if not planner.set_server(args.server):
-                print(f"\n指定的服务器 '{args.server}' 不存在")
-                
-                # 列出可用的服务器
-                servers = planner.list_available_servers()
-                if servers:
-                    print("\n可用的服务器:")
-                    for i, server in enumerate(servers, 1):
-                        print(f"{i}. {server}")
-                    
-                    # 提示用户选择一个服务器
-                    server_choice = input("\n请选择要使用的服务器 (输入编号): ").strip()
-                    try:
-                        choice_index = int(server_choice) - 1
-                        if 0 <= choice_index < len(servers):
-                            selected_server = servers[choice_index]
-                            planner.set_server(selected_server)
-                            print(f"\n已选择服务器: {selected_server}")
-                        else:
-                            print("\n无效的选择，使用默认服务器")
-                    except ValueError:
-                        print("\n无效的输入，使用默认服务器")
-                else:
-                    print("\n未找到可用的服务器，程序退出")
-                    return
-            
+            # 连接指定的服务器
+            connected = await planner.connect_to_server(args.server)
+            if not connected:
+                print(f"无法连接到指定的服务器: {args.server}")
+                return
+        else:
+            # 连接默认服务器
+            connected = await planner.connect_to_server()
+            if not connected:
+                print("无法连接到默认服务器")
+                return
         
-        # 列出可用的服务器
-        servers = planner.list_available_servers()
-        if len(servers) > 1:
-            print(f"\n可用的服务器 ({len(servers)}):")
-            for i, server in enumerate(servers, 1):
-                is_current = " (当前使用)" if planner.available_servers[server] == planner.server_path else ""
-                print(f"{i}. {server}{is_current}")
-            
-            server_choice = input("\n要切换服务器吗? (输入编号或直接回车继续): ").strip()
-            if server_choice:
-                try:
-                    choice_index = int(server_choice) - 1
-                    if 0 <= choice_index < len(servers):
-                        selected_server = servers[choice_index]
-                        planner.set_server(selected_server)
-                        print(f"\n已切换到服务器: {selected_server}")
-                    else:
-                        print("\n无效的选择，保持当前服务器")
-                except ValueError:
-                    print("\n无效的输入，保持当前服务器")
-        
-        connected = await planner.connect_to_server()
-        if not connected:
-            print("\n无法连接到服务器，程序退出")
+        # 使用CLI模式
+        if args.cli:
+            await run_cli_mode(args.query)
             return
         
-        # 主循环
-        while True:
-            try:
-                user_request = input("\n请输入您的请求 (输入'quit'退出, 'switch'切换服务器): ").strip()
-                
-                if user_request.lower() == 'quit':
-                    break
-                
-                if user_request.lower() == 'switch':
-                    servers = planner.list_available_servers()
-                    if servers:
-                        print("\n可用的服务器:")
-                        for i, server in enumerate(servers, 1):
-                            is_current = " (当前使用)" if planner.available_servers[server] == planner.server_path else ""
-                            print(f"{i}. {server}{is_current}")
-                        
-                        server_choice = input("\n请选择要使用的服务器 (输入编号): ").strip()
-                        try:
-                            choice_index = int(server_choice) - 1
-                            if 0 <= choice_index < len(servers):
-                                selected_server = servers[choice_index]
-                                
-                                # 清理当前连接
-                                await planner.cleanup()
-                                
-                                # 设置新服务器
-                                planner.set_server(selected_server)
-                                print(f"\n已切换到服务器: {selected_server}")
-                                
-                                # 连接到新服务器
-                                connected = await planner.connect_to_server()
-                                if not connected:
-                                    print("\n无法连接到新服务器，请尝试其他服务器")
-                            else:
-                                print("\n无效的选择，保持当前服务器")
-                        except ValueError:
-                            print("\n无效的输入，保持当前服务器")
-                    else:
-                        print("\n未找到可用的服务器")
-                    continue
-                    
-                if not user_request:
-                    continue
-                    
-                # 1. 规划任务
-                print("\n正在分析您的请求...")
-                tasks = await planner.plan_tasks(user_request)
-                
-                if not tasks:
-                    print("\n未能从您的请求中提取出具体任务，请尝试更明确的描述")
-                    continue
-                    
-                print(f"\n已将您的请求拆解为 {len(tasks)} 个任务:")
-                for i, task in enumerate(tasks, 1):
-                    print(f"{i}. {task}")
-                    
-                # 确认是否执行
-                confirm = input("\n是否执行这些任务? (y/n): ").strip().lower()
-                if confirm != 'y':
-                    print("\n已取消任务执行")
-                    continue
-                    
-                # 2. 执行任务
-                results = await planner.execute_tasks(tasks)
-                
-                # 3. 生成总结
-                print("\n所有任务已执行完毕，正在生成总结...")
-                summary = await planner.summarize_results(user_request, tasks, results)
-                
-                print("\n执行总结:")
-                print(summary)
-                
-            except KeyboardInterrupt:
-                print("\n程序已被用户中断")
-                break
-            except Exception as e:
-                print(f"\n出现错误: {str(e)}")
-                
-    except KeyboardInterrupt:
-        print("\n程序已被用户中断")
+        # API模式
+        await start_api_server(args.port, args.host)
     except Exception as e:
         print(f"\n初始化过程中出现错误: {str(e)}")
+        traceback_str = traceback.format_exc()
+        print(traceback_str)
+    except KeyboardInterrupt:
+        print("\n检测到键盘中断，程序即将退出...")
     finally:
-        # 清理资源
-        if 'planner' in locals():
-            await planner.cleanup()
-        print("\n程序已退出")
+        # 在异步环境中清理资源
+        if planner:
+            try:
+                await planner.cleanup()
+            except Exception as e:
+                print(f"清理资源时出错: {str(e)}")
+            except asyncio.CancelledError:
+                print("清理过程被取消")
+            print("\n程序已退出")
+
+def main():
+    """主函数入口点"""
+    # 设置事件循环
+    try:
+        # 检查是否已有事件循环
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            # 如果循环已关闭，创建新的循环
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+    except RuntimeError:
+        # 如果没有事件循环，创建新的循环
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    try:
+        # 运行异步主函数
+        loop.run_until_complete(main_async())
+    except KeyboardInterrupt:
+        print("\n程序被用户中断")
+    except Exception as e:
+        print(f"\n程序运行出错: {str(e)}")
+        traceback.print_exc()
+    finally:
+        # 关闭事件循环前确保所有待处理的任务都已完成
+        pending = asyncio.all_tasks(loop)
+        for task in pending:
+            task.cancel()
+            
+        # 允许任务有机会处理取消
+        if pending:
+            try:
+                # 等待所有任务处理它们的取消
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            except Exception as e:
+                print(f"关闭待处理任务时出错: {str(e)}")
+        
+        # 最后关闭事件循环
+        loop.close()
+
+async def manage_servers_interactive(planner: TaskPlanner):
+    """服务器管理交互界面"""
+    while True:
+        servers = planner.get_server_status()
+        print("\n=== 服务器管理 ===")
+        print("可用的服务器:")
+        for i, (server_name, server_info) in enumerate(servers.items(), 1):
+            enabled_status = "✓" if server_info["enabled"] else "✗"
+            default_status = "默认" if server_info.get("default", False) else ""
+            print(f"{i}. [{enabled_status}] {server_name} - {server_info['description']} {default_status}")
+        
+        print("\n操作选项:")
+        print("E - 启用服务器")
+        print("D - 禁用服务器")
+        print("S - 设置默认服务器")
+        print("R - 刷新服务器列表")
+        print("Q - 返回主菜单")
+        
+        choice = input("\n请选择操作 (输入编号或选项): ").strip().upper()
+        
+        if choice == 'Q':
+            break
+        
+        if choice == 'R':
+            # 刷新服务器列表
+            planner.update_server_paths()
+            print("\n已刷新服务器列表")
+            continue
+        
+        if choice == 'E' or choice == 'D' or choice == 'S':
+            server_choice = input("请选择服务器 (输入编号): ").strip()
+            try:
+                choice_index = int(server_choice) - 1
+                server_names = list(servers.keys())
+                if 0 <= choice_index < len(server_names):
+                    selected_server = server_names[choice_index]
+                    
+                    if choice == 'E':
+                        # 启用服务器
+                        planner.enable_server(selected_server)
+                        print(f"\n已启用服务器: {selected_server}")
+                    elif choice == 'D':
+                        # 禁用服务器
+                        planner.disable_server(selected_server)
+                        print(f"\n已禁用服务器: {selected_server}")
+                    elif choice == 'S':
+                        # 设置默认服务器
+                        planner.set_default_server(selected_server)
+                        print(f"\n已将 {selected_server} 设置为默认服务器")
+                else:
+                    print("\n无效的选择")
+            except ValueError:
+                print("\n无效的输入")
+            continue
+        
+        try:
+            choice_index = int(choice) - 1
+            server_names = list(servers.keys())
+            if 0 <= choice_index < len(server_names):
+                selected_server = server_names[choice_index]
+                
+                # 显示服务器详情
+                server_info = servers[selected_server]
+                print(f"\n=== {selected_server} 服务器详情 ===")
+                print(f"描述: {server_info['description']}")
+                print(f"路径: {server_info['path']}")
+                print(f"状态: {'启用' if server_info['enabled'] else '禁用'}")
+                print(f"默认: {'是' if server_info.get('default', False) else '否'}")
+                
+                # 操作选项
+                print("\n操作选项:")
+                print("1 - " + ("禁用" if server_info["enabled"] else "启用"))
+                print("2 - " + ("取消默认" if server_info.get("default", False) else "设为默认"))
+                print("Q - 返回")
+                
+                sub_choice = input("\n请选择操作: ").strip()
+                
+                if sub_choice == '1':
+                    if server_info["enabled"]:
+                        planner.disable_server(selected_server)
+                        print(f"\n已禁用服务器: {selected_server}")
+                    else:
+                        planner.enable_server(selected_server)
+                        print(f"\n已启用服务器: {selected_server}")
+                elif sub_choice == '2':
+                    if not server_info.get("default", False):
+                        planner.set_default_server(selected_server)
+                        print(f"\n已将 {selected_server} 设置为默认服务器")
+            else:
+                print("\n无效的选择")
+        except ValueError:
+            print("\n无效的输入")
+
+async def list_servers(planner: TaskPlanner):
+    """列出所有可用的服务器"""
+    server_status = planner.get_server_status()
+    if not server_status:
+        print("\n未找到任何可用的服务器")
+        return
+        
+    print("\n可用的服务器列表:")
+    for i, (server_name, server_info) in enumerate(server_status.items(), 1):
+        enabled_status = "✓" if server_info.get("enabled", True) else "✗"
+        default_status = "默认" if server_name == planner.server_config["config"]["default_server"] else ""
+        print(f"{i}. [{enabled_status}] {server_name} - {server_info['description']} {default_status}")
+        print(f"   路径: {server_info['path']}")
+        
+    print(f"\n默认服务器: {planner.server_config['config']['default_server']}")
+    print(f"服务器配置文件: {planner.config_file}")
+
+async def interactive_mode(planner: TaskPlanner):
+    """交互式命令行模式"""
+    print("\n欢迎使用Deepin MCP 任务规划系统")
+    print("使用 'quit' 退出，'servers' 管理服务器，'switch' 切换服务器")
+    
+    while True:
+        try:
+            user_request = input("\n请输入您的请求: ").strip()
+            
+            if user_request.lower() == 'quit':
+                print("\n感谢使用，再见！")
+                break
+                
+            if user_request.lower() == 'servers':
+                await list_servers(planner)
+                continue
+                
+            if user_request.lower() == 'switch':
+                await switch_server_interactive(planner)
+                continue
+                
+            if not user_request:
+                continue
+                
+            # 1. 规划任务
+            print("\n正在分析您的请求...")
+            tasks = await planner.plan_tasks(user_request)
+            
+            if not tasks:
+                print("\n未能从您的请求中提取出具体任务，请尝试更明确的描述")
+                continue
+                
+            print(f"\n已将您的请求拆解为 {len(tasks)} 个任务:")
+            for i, task in enumerate(tasks, 1):
+                print(f"{i}. {task}")
+                
+            # 确认是否执行
+            confirm = input("\n是否执行这些任务? (y/n): ").strip().lower()
+            if confirm != 'y':
+                print("\n已取消任务执行")
+                continue
+                
+            # 2. 执行任务
+            results = await planner.execute_tasks(tasks)
+            
+            # 3. 生成总结
+            print("\n所有任务已执行完毕，正在生成总结...")
+            summary = await planner.summarize_results(user_request, tasks, results)
+            
+            print("\n执行总结:")
+            print(summary)
+            
+        except KeyboardInterrupt:
+            print("\n操作已取消")
+        except Exception as e:
+            print(f"\n执行过程中出现错误: {str(e)}")
+            traceback_str = traceback.format_exc()
+            print(traceback_str)
+
+async def switch_server_interactive(planner: TaskPlanner):
+    """交互式切换服务器"""
+    server_status = planner.get_server_status()
+    enabled_servers = {name: info for name, info in server_status.items() if info.get("enabled", True)}
+    
+    if not enabled_servers:
+        print("\n未找到任何启用的服务器")
+        return
+        
+    print("\n可选的服务器:")
+    server_names = list(enabled_servers.keys())
+    for i, server_name in enumerate(server_names, 1):
+        server_info = enabled_servers[server_name]
+        current_indicator = " (当前使用)" if server_info["path"] == planner.server_path else ""
+        default_indicator = " (默认)" if server_name == planner.server_config["config"]["default_server"] else ""
+        print(f"{i}. {server_name}{current_indicator}{default_indicator} - {server_info['description']}")
+    
+    server_choice = input("\n请选择要切换的服务器 (输入编号): ").strip()
+    try:
+        choice_index = int(server_choice) - 1
+        if 0 <= choice_index < len(server_names):
+            selected_server = server_names[choice_index]
+            
+            # 切换服务器
+            result = await planner.switch_server(selected_server)
+            if result:
+                print(f"\n已成功切换到服务器: {selected_server}")
+            else:
+                print(f"\n切换服务器失败")
+        else:
+            print("\n无效的选择，未进行切换")
+    except ValueError:
+        print("\n无效的输入，未进行切换")
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n程序已被用户中断")
-    except Exception as e:
-        print(f"\n运行时发生错误: {str(e)}") 
+    main() 

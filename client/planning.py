@@ -4,7 +4,7 @@ import sys
 import json
 import glob
 import subprocess
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from pathlib import Path
 
 from openai import OpenAI
@@ -33,12 +33,130 @@ class TaskPlanner:
         # 初始化MCP客户端
         self.mcp_client = MCPClient()
         
-        # 查找可用的服务器脚本
-        self.available_servers = self.find_available_servers()
+        # 默认配置文件路径
+        self.config_file = self._get_config_file_path()
+        
+        # 加载服务器配置
+        self.server_config = self.load_server_config()
+        
+        # 更新服务器路径并查找新的服务器
+        self.update_server_paths()
+        
+        # 获取默认服务器路径
         self.server_path = self.get_default_server_path()
         
         if not self.server_path:
             raise FileNotFoundError("找不到任何可用的服务器脚本")
+
+    def _get_config_file_path(self) -> str:
+        """获取配置文件路径"""
+        # 检查是否在打包环境中运行
+        is_packaged = getattr(sys, 'frozen', False)
+        
+        # 获取可能的配置文件路径
+        search_paths = []
+        
+        # 当前工作目录
+        search_paths.append(Path.cwd() / "server_config.json")
+        
+        # 脚本所在目录
+        script_dir = Path(sys.argv[0]).resolve().parent
+        search_paths.append(script_dir / "server_config.json")
+        
+        # 可执行文件所在目录（针对PyInstaller打包的应用）
+        if is_packaged:
+            executable_dir = Path(sys.executable).resolve().parent
+            search_paths.append(executable_dir / "server_config.json")
+        
+        # 检查配置文件是否存在
+        for path in search_paths:
+            if path.exists():
+                return str(path)
+        
+        # 如果配置文件不存在，使用工作目录下的路径
+        return str(Path.cwd() / "server_config.json")
+
+    def load_server_config(self) -> Dict[str, Any]:
+        """加载服务器配置"""
+        if not os.path.exists(self.config_file):
+            print(f"\n服务器配置文件不存在: {self.config_file}")
+            print("将创建默认配置文件...")
+            
+            # 创建默认配置
+            default_config = {
+                "servers": {},
+                "config": {
+                    "auto_load_enabled": True,
+                    "default_server": "bash"
+                }
+            }
+            
+            # 保存默认配置到文件
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(default_config, f, ensure_ascii=False, indent=2)
+            
+            return default_config
+        
+        try:
+            with open(self.config_file, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            # 确保配置结构完整
+            if "servers" not in config:
+                config["servers"] = {}
+            if "config" not in config:
+                config["config"] = {
+                    "auto_load_enabled": True,
+                    "default_server": "bash"
+                }
+            
+            return config
+        except Exception as e:
+            print(f"\n加载服务器配置文件失败: {str(e)}")
+            print("将使用默认配置...")
+            
+            # 创建默认配置
+            default_config = {
+                "servers": {},
+                "config": {
+                    "auto_load_enabled": True,
+                    "default_server": "bash"
+                }
+            }
+            
+            return default_config
+
+    def save_server_config(self) -> bool:
+        """保存服务器配置到文件"""
+        try:
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(self.server_config, f, ensure_ascii=False, indent=2)
+            return True
+        except Exception as e:
+            print(f"\n保存服务器配置文件失败: {str(e)}")
+            return False
+
+    def update_server_paths(self) -> None:
+        """更新服务器路径并查找新的服务器"""
+        # 查找可用的服务器
+        self.available_servers = self.find_available_servers()
+        
+        # 更新配置中的服务器信息
+        for server_name, server_path in self.available_servers.items():
+            if server_name not in self.server_config["servers"]:
+                # 添加新发现的服务器
+                self.server_config["servers"][server_name] = {
+                    "path": server_path,
+                    "description": f"{server_name}服务器",
+                    "enabled": True,  # 默认启用
+                    "default": False
+                }
+            else:
+                # 更新服务器路径
+                self.server_config["servers"][server_name]["path"] = server_path
+        
+        # 保存更新后的配置
+        self.save_server_config()
 
     def find_available_servers(self) -> Dict[str, str]:
         """
@@ -138,16 +256,39 @@ class TaskPlanner:
 
     def get_default_server_path(self) -> Optional[str]:
         """
-        获取默认服务器路径，优先使用bash_server
+        获取默认服务器路径
         
         Returns:
             Optional[str]: 默认服务器路径
         """
-        # 优先使用bash_server
-        if 'bash' in self.available_servers:
-            return self.available_servers['bash']
+        # 从配置中获取默认服务器
+        default_server = self.server_config["config"]["default_server"]
         
-        # 如果没有bash_server，使用第一个可用的服务器
+        # 检查默认服务器是否存在且已启用
+        if (default_server in self.server_config["servers"] and 
+            self.server_config["servers"][default_server]["enabled"]):
+            server_info = self.server_config["servers"][default_server]
+            
+            # 检查路径是否存在
+            if os.path.exists(server_info["path"]):
+                return server_info["path"]
+            
+            # 如果路径不存在，尝试使用available_servers中的路径
+            if default_server in self.available_servers:
+                return self.available_servers[default_server]
+        
+        # 如果默认服务器不可用，尝试找到第一个启用的服务器
+        for server_name, server_info in self.server_config["servers"].items():
+            if server_info["enabled"]:
+                # 检查路径是否存在
+                if os.path.exists(server_info["path"]):
+                    return server_info["path"]
+                
+                # 如果路径不存在，尝试使用available_servers中的路径
+                if server_name in self.available_servers:
+                    return self.available_servers[server_name]
+        
+        # 如果没有找到启用的服务器，使用第一个可用的服务器
         if self.available_servers:
             return next(iter(self.available_servers.values()))
         
@@ -160,7 +301,70 @@ class TaskPlanner:
         Returns:
             List[str]: 可用服务器名称列表
         """
-        return list(self.available_servers.keys())
+        return list(self.server_config["servers"].keys())
+    
+    def get_server_status(self) -> Dict[str, Dict[str, Any]]:
+        """
+        获取所有服务器的状态
+        
+        Returns:
+            Dict[str, Dict[str, Any]]: 服务器状态信息
+        """
+        return self.server_config["servers"]
+
+    def enable_server(self, server_name: str) -> bool:
+        """
+        启用服务器
+        
+        Args:
+            server_name: 服务器名称
+            
+        Returns:
+            bool: 是否成功启用
+        """
+        if server_name in self.server_config["servers"]:
+            self.server_config["servers"][server_name]["enabled"] = True
+            self.save_server_config()
+            return True
+        return False
+
+    def disable_server(self, server_name: str) -> bool:
+        """
+        禁用服务器
+        
+        Args:
+            server_name: 服务器名称
+            
+        Returns:
+            bool: 是否成功禁用
+        """
+        if server_name in self.server_config["servers"]:
+            self.server_config["servers"][server_name]["enabled"] = False
+            self.save_server_config()
+            return True
+        return False
+
+    def set_default_server(self, server_name: str) -> bool:
+        """
+        设置默认服务器
+        
+        Args:
+            server_name: 服务器名称
+            
+        Returns:
+            bool: 是否成功设置
+        """
+        if server_name in self.server_config["servers"]:
+            # 清除之前的默认服务器
+            for name in self.server_config["servers"]:
+                self.server_config["servers"][name]["default"] = False
+            
+            # 设置新的默认服务器
+            self.server_config["servers"][server_name]["default"] = True
+            self.server_config["config"]["default_server"] = server_name
+            self.save_server_config()
+            return True
+        return False
 
     def set_server(self, server_name: str) -> bool:
         """
@@ -173,9 +377,20 @@ class TaskPlanner:
             bool: 是否成功设置
         """
         # 检查是否是已知的服务器名称
-        if server_name in self.available_servers:
-            self.server_path = self.available_servers[server_name]
-            return True
+        if server_name in self.server_config["servers"]:
+            # 先检查配置中的路径是否存在
+            server_path = self.server_config["servers"][server_name]["path"]
+            if os.path.exists(server_path):
+                self.server_path = server_path
+                return True
+            
+            # 如果路径不存在，尝试使用available_servers中的路径
+            if server_name in self.available_servers:
+                self.server_path = self.available_servers[server_name]
+                return True
+            
+            print(f"\n警告: 服务器 '{server_name}' 配置中的路径不存在: {server_path}")
+            return False
         
         # 检查是否是路径而非名称
         if os.path.exists(server_name):
@@ -197,6 +412,7 @@ class TaskPlanner:
                 self.server_path = f"{run_server_script} {server_name}"
                 return True
             
+        print(f"\n未找到服务器 '{server_name}'")
         return False
 
     async def plan_tasks(self, user_request: str) -> List[str]:
@@ -297,16 +513,100 @@ class TaskPlanner:
 
     async def connect_to_server(self) -> bool:
         """
-        连接到MCP服务器
+        连接到所有启用的MCP服务器，并加载它们的所有工具
         
         Returns:
-            bool: 连接是否成功
+            bool: 是否成功连接至少一个服务器
         """
         try:
-            await self.mcp_client.connect_to_server(self.server_path)
+            # 获取所有启用的服务器列表
+            enabled_servers = {}
+            for server_name, server_info in self.server_config["servers"].items():
+                if server_info.get("enabled", True):
+                    # 检查路径是否存在
+                    if os.path.exists(server_info["path"]):
+                        enabled_servers[server_name] = server_info["path"]
+                    # 如果路径不存在，尝试使用available_servers中的路径
+                    elif server_name in self.available_servers:
+                        enabled_servers[server_name] = self.available_servers[server_name]
+            
+            if not enabled_servers:
+                print("\n未找到任何启用的服务器，将尝试发现可用服务器")
+                # 重新扫描可用服务器
+                self.update_server_paths()
+                for server_name, server_path in self.available_servers.items():
+                    enabled_servers[server_name] = server_path
+                
+                if not enabled_servers:
+                    print("\n未找到任何可用服务器")
+                    return False
+            
+            # 记录所有成功连接的服务器及其工具
+            connected_servers = {}
+            all_tools = []
+            
+            # 连接每个服务器并获取工具
+            for server_name, server_path in enabled_servers.items():
+                try:
+                    print(f"\n正在连接服务器: {server_name} ({server_path})")
+                    
+                    # 初始化一个新的MCP客户端
+                    client = MCPClient()
+                    
+                    # 连接到服务器
+                    await client.connect_to_server(server_path)
+                    
+                    # 获取服务器工具列表
+                    response = await client.session.list_tools()
+                    server_tools = response.tools
+                    
+                    # 为每个工具添加服务器来源标记
+                    for tool in server_tools:
+                        tool.name = f"{server_name}.{tool.name}"
+                    
+                    # 记录服务器工具
+                    connected_servers[server_name] = {
+                        "client": client,
+                        "path": server_path,
+                        "tools": server_tools,
+                        "description": self.server_config["servers"].get(server_name, {}).get("description", f"{server_name}服务器")
+                    }
+                    
+                    # 添加到全局工具列表
+                    all_tools.extend(server_tools)
+                    
+                    print(f"服务器 '{server_name}' 连接成功，提供 {len(server_tools)} 个工具")
+                except Exception as e:
+                    print(f"连接服务器 '{server_name}' 失败: {str(e)}")
+            
+            # 检查是否至少连接到了一个服务器
+            if not connected_servers:
+                print("\n未能成功连接到任何服务器")
+                return False
+            
+            # 设置主客户端为第一个连接成功的服务器客户端
+            # 注：这仅用于向后兼容，实际上我们现在整合了所有服务器的工具
+            first_server = next(iter(connected_servers.values()))
+            self.mcp_client = first_server["client"]
+            self.server_path = first_server["path"]
+            
+            # 保存所有连接的服务器信息
+            self.connected_servers = connected_servers
+            self.all_tools = all_tools
+            
+            # 输出所有可用工具
+            tool_count = len(all_tools)
+            print(f"\n成功连接 {len(connected_servers)} 个服务器，共有 {tool_count} 个可用工具")
+            
+            # 按服务器分组显示工具
+            for server_name, server_info in connected_servers.items():
+                print(f"\n{server_name} 服务器工具 ({len(server_info['tools'])}):")
+                for tool in server_info["tools"]:
+                    print(f"  - {tool.name}")
+            
             return True
         except Exception as e:
-            print(f"\n连接服务器失败: {str(e)}")
+            print(f"\n连接服务器过程中出现错误: {str(e)}")
             return False
 
     async def execute_task(self, task: str) -> str:
@@ -320,7 +620,15 @@ class TaskPlanner:
             str: 任务执行结果
         """
         try:
-            result = await self.mcp_client.process_query(task)
+            # 如果没有连接服务器，尝试连接
+            if not hasattr(self, 'connected_servers') or not self.connected_servers:
+                connected = await self.connect_to_server()
+                if not connected:
+                    return "错误: 未连接到任何服务器"
+            
+            # 使用适当的服务器客户端处理查询
+            # 注：mcp_client 只是为了向后兼容
+            result = await self.mcp_client.process_query(task, self.all_tools, self.connected_servers)
             return result
         except Exception as e:
             return f"执行任务失败: {str(e)}"
@@ -393,9 +701,144 @@ class TaskPlanner:
         return response.choices[0].message.content
 
     async def cleanup(self):
-        """清理资源"""
-        if self.mcp_client:
-            await self.mcp_client.cleanup()
+        """清理服务器连接和会话"""
+        if not hasattr(self, 'connected_servers') or not self.connected_servers:
+            return
+        
+        # 创建清理任务列表
+        cleanup_tasks = []
+        for server_name, server_info in list(self.connected_servers.items()):
+            # 添加任务而不是立即执行
+            cleanup_tasks.append(self._cleanup_client(server_name, server_info["client"]))
+        
+        if cleanup_tasks:
+            try:
+                # 并行执行所有清理任务，允许部分失败
+                await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+            except asyncio.CancelledError:
+                print("注意: 清理过程中被取消")
+            except Exception as e:
+                print(f"清理过程中出现错误: {e}")
+        
+        # 清空服务器客户端列表
+        self.connected_servers = {}
+
+    async def _cleanup_client(self, server_name, client):
+        """清理单个客户端的资源，作为独立的异步任务"""
+        try:
+            if hasattr(client, 'process') and client.process:
+                if client.process.returncode is None:
+                    try:
+                        # 发送终止信号
+                        client.process.terminate()
+                        # 等待进程终止，但设置超时
+                        await asyncio.wait_for(
+                            asyncio.create_subprocess_exec(
+                                "wait", str(client.process.pid),
+                                stdout=asyncio.subprocess.DEVNULL,
+                                stderr=asyncio.subprocess.DEVNULL
+                            ),
+                            timeout=2.0
+                        )
+                    except asyncio.TimeoutError:
+                        # 如果等待超时，强制终止
+                        if client.process.returncode is None:
+                            try:
+                                client.process.kill()
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        print(f"终止服务器进程时出错: {e}")
+            
+            # 关闭WebSocket连接
+            if hasattr(client, 'ws') and client.ws:
+                try:
+                    await client.ws.close()
+                except Exception:
+                    pass
+            
+            print(f"已清理服务器客户端: {server_name}")
+        except asyncio.CancelledError:
+            # 即使被取消也要尝试关闭资源
+            try:
+                if hasattr(client, 'process') and client.process and client.process.returncode is None:
+                    client.process.kill()
+                if hasattr(client, 'ws') and client.ws:
+                    await client.ws.close()
+            except Exception:
+                pass
+            print(f"服务器客户端 {server_name} 清理过程被取消")
+            # 重新引发CancelledError以便调用者知道任务被取消
+            raise
+        except Exception as e:
+            print(f"清理服务器客户端 {server_name} 时出错: {e}")
+            # 不重新引发异常，以便其他客户端可以继续清理
+
+    async def switch_server(self, server_name: str) -> bool:
+        """
+        切换当前使用的服务器
+        
+        Args:
+            server_name: 服务器名称
+            
+        Returns:
+            bool: 是否成功切换
+        """
+        try:
+            # 检查服务器是否存在
+            if server_name not in self.server_config["servers"]:
+                print(f"\n服务器 '{server_name}' 不存在")
+                return False
+                
+            # 检查服务器是否已启用
+            if not self.server_config["servers"][server_name].get("enabled", True):
+                print(f"\n服务器 '{server_name}' 未启用")
+                return False
+                
+            # 获取服务器路径
+            server_path = self.server_config["servers"][server_name].get("path")
+            
+            # 检查路径是否存在
+            if not os.path.exists(server_path):
+                # 尝试使用available_servers中的路径
+                if server_name in self.available_servers:
+                    server_path = self.available_servers[server_name]
+                else:
+                    print(f"\n服务器 '{server_name}' 路径不存在")
+                    return False
+            
+            # 清理当前连接
+            if self.mcp_client:
+                await self.mcp_client.cleanup()
+            
+            # 初始化新的MCP客户端
+            self.mcp_client = MCPClient()
+            
+            # 连接到新服务器
+            print(f"\n正在切换到服务器: {server_name} ({server_path})")
+            await self.mcp_client.connect_to_server(server_path)
+            
+            # 更新服务器状态
+            if hasattr(self, 'available_server_status'):
+                for name in self.available_server_status:
+                    self.available_server_status[name]["status"] = "available"
+                
+                if server_name in self.available_server_status:
+                    self.available_server_status[server_name]["status"] = "ready"
+            
+            # 更新当前服务器路径
+            self.server_path = server_path
+            
+            # 获取服务器的工具列表
+            response = await self.mcp_client.session.list_tools()
+            tools = response.tools
+            print(f"\n已切换到服务器: {server_name}")
+            print(f"可用工具: {[tool.name for tool in tools]}")
+            
+            return True
+        except Exception as e:
+            print(f"\n切换服务器失败: {str(e)}")
+            return False
 
 async def main():
     planner = TaskPlanner()

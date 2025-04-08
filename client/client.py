@@ -122,7 +122,7 @@ class MCPClient:
         tools = response.tools
         print(f"\n已链接到服务器， 可用的工具：", [tool.name for tool in tools])
         
-    async def process_query(self, query: str) -> str:
+    async def process_query(self, query: str, all_tools=None, connected_servers=None) -> str:
         # 记录用户的原始查询
         self.command_history.append(query)
         
@@ -154,7 +154,7 @@ class MCPClient:
         print(f"翻译结果: {translated_content}")
         
         # 检查是否返回了有效的命令格式
-        if "CMD:" in translated_content:
+        if "CMD:" in translated_content and (all_tools is None or connected_servers is None):
             # 提取命令部分
             cmd_parts = translated_content.split("CMD:", 1)[1].strip()
             
@@ -248,507 +248,226 @@ class MCPClient:
                 else:
                     user_message = translated_content
         else:
-            # 创建包含历史上下文的用户消息
-            if history_context:
-                user_message = f"{history_context}\n\n当前查询: {translated_content}"
-            else:
-                user_message = translated_content
-
-        # 复制历史消息列表用于本次查询
-        current_messages = self.history_messages.copy()
-        current_messages.append({"role": "user", "content": user_message})
+            # 进入常规工具调用处理
+            user_message = query
         
-        response = await self.session.list_tools()
-        
-        # 构建可用工具列表
-        available_tools = [{"type": "function", 
-                            "function": {
-                                "name": tool.name, 
-                                "description": tool.description, 
-                                "input_schema": tool.inputSchema
-                                }
-                            } for tool in response.tools]
-        
-        response = self.client.chat.completions.create(
-            model = self.model,
-            messages = current_messages,
-            tools = available_tools,
-            temperature = 0.7  # 初始调用保持适当的创造性
-        )
-        
-        print(f"\n{response}")
-        
-        content = response.choices[0]
-        if content.finish_reason == "tool_calls":
-            tool_call = content.message.tool_calls[0]
-            tool_name = tool_call.function.name
-            tool_args = json.loads(tool_call.function.arguments)
-            
-            # 执行工具调用
+        # 在这里处理集成多服务器工具的情况
+        if all_tools is not None and connected_servers is not None:
             try:
-                print(f"\n\n[Calling tool {tool_name} with args {tool_args}]\n\n")
-                result = await self.session.call_tool(tool_name, tool_args)
+                # 构建所有可用工具列表
+                available_tools = [{"type": "function", 
+                                   "function": {
+                                       "name": tool.name, 
+                                       "description": tool.description, 
+                                       "input_schema": tool.inputSchema
+                                       }
+                                   } for tool in all_tools]
                 
-                # 检查工具调用结果是否成功
-                # 这里我们假设如果有错误，result.content[0].text中会包含错误信息
-                tool_result = str(result.content[0].text)
+                # 使用模型选择最合适的工具
+                content = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": "你是一个专注于执行工具调用的助手。分析用户请求，选择最合适的工具进行调用。工具名称格式为'server_name.tool_name'，表示该工具由哪个服务器提供。针对文件操作使用file服务器工具，针对命令行操作使用bash服务器工具。"},
+                        {"role": "user", "content": user_message}
+                    ],
+                    tools=available_tools,
+                    tool_choice="auto"  # 自动选择最合适的工具
+                )
                 
-                # 判断是否是工具调用失败
-                english_indicators = ["error", "exception", "failed"]
-                chinese_indicators = ["失败", "不存在", "无法", "错误", "未找到", "无效", "请检查", "请确认", "不正确"]
-                
-                # 检查工具结果是否包含任何错误指示器
-                is_english_failed = any(indicator in tool_result.lower() for indicator in english_indicators)
-                is_chinese_failed = any(indicator in tool_result for indicator in chinese_indicators)
-                
-                # 如果结果中包含任何一个错误指示器，则认为调用失败
-                if is_english_failed or is_chinese_failed:
-                    print(f"\n[Tool call failed: {tool_result}]")
+                # 检查模型是否决定调用工具
+                if content.choices[0].finish_reason == "tool_calls":
+                    # 获取工具调用信息
+                    tool_call = content.choices[0].message.tool_calls[0]
+                    tool_name = tool_call.function.name
+                    tool_args = json.loads(tool_call.function.arguments)
                     
-                    # 分析错误原因和可能的解决方案
-                    error_analysis_messages = [
-                        {"role": "system", "content": "你是一个专注于分析工具调用错误的专家。请提供简明扼要的错误分析和具体可执行的解决方案。不要发散讨论。"},
-                        {"role": "user", "content": f"工具'{tool_name}'调用失败，错误信息：{tool_result}。原始调用参数：{json.dumps(tool_args)}。可用工具：{[t['function']['name'] for t in available_tools]}。请分析错误原因并提供具体解决方案。"}
+                    # 解析工具名称，获取服务器名称和实际工具名称
+                    server_name, actual_tool_name = tool_name.split(".", 1)
+                    
+                    print(f"\n\n[调用服务器 '{server_name}' 的工具 '{actual_tool_name}' 参数: {tool_args}]\n\n")
+                    
+                    # 检查服务器是否存在
+                    if server_name not in connected_servers:
+                        return f"错误: 服务器 '{server_name}' 不存在或未连接"
+                    
+                    # 获取对应服务器的客户端
+                    server_client = connected_servers[server_name]["client"]
+                    
+                    # 调用工具
+                    result = await server_client.session.call_tool(actual_tool_name, tool_args)
+                    tool_result = str(result.content[0].text)
+                    
+                    # 生成最终结果
+                    current_messages = self.history_messages + [
+                        {"role": "user", "content": user_message},
+                        content.choices[0].message.model_dump(),
+                        {"role": "tool", "content": tool_result, "tool_call_id": tool_call.id}
                     ]
                     
-                    error_analysis = self.client.chat.completions.create(
-                        model = self.model,
-                        messages = error_analysis_messages
-                    )
-                    
-                    analysis_result = error_analysis.choices[0].message.content
-                    print(f"\n[Error analysis: {analysis_result}]")
-                    
-                    # 生成新的消息进行重试
-                    retry_messages = current_messages.copy()
-                    retry_messages.append(content.message.model_dump())
-                    retry_messages.append({
-                        "role": "tool",
-                        "content": tool_result,
-                        "tool_call_id": tool_call.id
-                    })
-                    retry_messages.append({
-                        "role": "system", 
-                        "content": "工具调用失败。请分析失败原因，并立即使用正确的参数重新调用工具。你必须使用工具，不要只给出分析。"
-                    })
-                    retry_messages.append({
-                        "role": "user", 
-                        "content": f"刚才的工具调用失败了，错误信息是：{tool_result}。请分析原因并立即使用修正后的参数重新调用工具。"
-                    })
-                    
-                    # 重新调用模型进行修正
-                    retry_response = self.client.chat.completions.create(
-                        model = self.model,
-                        messages = retry_messages,
-                        temperature = 0.2,  # 降低温度，使回复更加可控和专注
-                        tools = available_tools,  # 提供工具列表
-                        tool_choice = "auto"  # 强制模型选择使用工具
-                    )
-                    
-                    # 检查重试结果
-                    retry_content = retry_response.choices[0]
-                    if retry_content.finish_reason == "tool_calls":
-                        # 处理重试的工具调用
-                        retry_tool_call = retry_content.message.tool_calls[0]
-                        retry_tool_name = retry_tool_call.function.name
-                        retry_tool_args = json.loads(retry_tool_call.function.arguments)
-                        
-                        print(f"\n\n[Retrying tool {retry_tool_name} with args {retry_tool_args}]\n\n")
-                        
-                        try:
-                            retry_result = await self.session.call_tool(retry_tool_name, retry_tool_args)
-                            retry_tool_result = str(retry_result.content[0].text)
-                            
-                            # 检查重试结果是否成功
-                            english_indicators = ["error", "exception", "failed"]
-                            chinese_indicators = ["失败", "不存在", "无法", "错误", "未找到", "无效", "请检查", "请确认", "不正确"]
-                            
-                            is_english_failed = any(indicator in retry_tool_result.lower() for indicator in english_indicators)
-                            is_chinese_failed = any(indicator in retry_tool_result for indicator in chinese_indicators)
-                            
-                            if is_english_failed or is_chinese_failed:
-                                print(f"\n[Retry tool call failed: {retry_tool_result}]")
-                                raise Exception(f"重试工具调用依然失败: {retry_tool_result}")
-                                
-                            # 更新消息
-                            retry_messages.append(retry_content.message.model_dump())
-                            retry_messages.append({
-                                "role": "tool",
-                                "content": retry_tool_result,
-                                "tool_call_id": retry_tool_call.id
-                            })
-                            
-                            # 最终响应
-                            final_response = self.client.chat.completions.create(
-                                model = self.model,
-                                messages = retry_messages
-                            )
-                            
-                            # 更新历史消息
-                            self._add_to_history(query, final_response.choices[0].message.content)
-                            
-                            return final_response.choices[0].message.content
-                        except Exception as e:
-                            # 如果重试仍然失败，返回错误信息
-                            error_message = f"工具调用重试失败: {str(e)}"
-                            print(f"\n[{error_message}]")
-                            
-                            retry_messages.append({
-                                "role": "system",
-                                "content": f"{error_message}。请再尝试一次，修正参数后必须重新调用工具。"
-                            })
-                            retry_messages.append({
-                                "role": "user",
-                                "content": "请仔细检查参数并再次尝试，必须使用正确的工具和参数。"
-                            })
-                            
-                            final_retry_response = self.client.chat.completions.create(
-                                model = self.model,
-                                messages = retry_messages,
-                                temperature = 0.2,  # 降低温度，使回复更加可控和专注
-                                tools = available_tools,  # 提供工具列表
-                                tool_choice = "auto"  # 强制模型选择使用工具
-                            )
-                            
-                            final_retry_content = final_retry_response.choices[0]
-                            if final_retry_content.finish_reason == "tool_calls":
-                                # 处理最终重试的工具调用
-                                final_tool_call = final_retry_content.message.tool_calls[0]
-                                final_tool_name = final_tool_call.function.name
-                                final_tool_args = json.loads(final_tool_call.function.arguments)
-                                
-                                print(f"\n\n[Final retry tool {final_tool_name} with args {final_tool_args}]\n\n")
-                                
-                                try:
-                                    final_result = await self.session.call_tool(final_tool_name, final_tool_args)
-                                    final_tool_result = str(final_result.content[0].text)
-                                    
-                                    # 检查最终重试结果是否成功
-                                    english_indicators = ["error", "exception", "failed"]
-                                    chinese_indicators = ["失败", "不存在", "无法", "错误", "未找到", "无效", "请检查", "请确认", "不正确"]
-                                    
-                                    is_english_failed = any(indicator in final_tool_result.lower() for indicator in english_indicators)
-                                    is_chinese_failed = any(indicator in final_tool_result for indicator in chinese_indicators)
-                                    
-                                    if is_english_failed or is_chinese_failed:
-                                        print(f"\n[Final retry tool call failed: {final_tool_result}]")
-                                        
-                                        # 更新历史消息
-                                        self._add_to_history(query, f"工具调用多次失败。最终错误：{final_tool_result}")
-                                        
-                                        return f"工具调用多次失败。最终错误：{final_tool_result}"
-                                    
-                                    # 更新消息
-                                    retry_messages.append(final_retry_content.message.model_dump())
-                                    retry_messages.append({
-                                        "role": "tool",
-                                        "content": final_tool_result,
-                                        "tool_call_id": final_tool_call.id
-                                    })
-                                    
-                                    # 最终响应
-                                    final_response = self.client.chat.completions.create(
-                                        model = self.model,
-                                        messages = retry_messages,
-                                        temperature = 0.3
-                                    )
-                                    
-                                    # 更新历史消息
-                                    self._add_to_history(query, final_response.choices[0].message.content)
-                                    
-                                    return final_response.choices[0].message.content
-                                except Exception as last_error:
-                                    error_result = f"工具调用多次失败。最终错误：{str(last_error)}。请检查参数并手动重试。"
-                                    
-                                    # 更新历史消息
-                                    self._add_to_history(query, error_result)
-                                    
-                                    return error_result
-                            
-                            error_response = self.client.chat.completions.create(
-                                model = self.model,
-                                messages = retry_messages,
-                                temperature = 0.2  # 降低温度，使回复更加可控和专注
-                            )
-                            
-                            # 更新历史消息
-                            self._add_to_history(query, error_response.choices[0].message.content)
-                            
-                            return error_response.choices[0].message.content
-                    else:
-                        # 重试没有进行工具调用
-                        
-                        # 更新历史消息
-                        self._add_to_history(query, retry_content.message.content)
-                        
-                        return retry_content.message.content
-                else:
-                    # 工具调用成功，继续正常处理
-                    # 更新消息，确保所有内容都是字符串类型
-                    current_messages.append(content.message.model_dump())
-                    current_messages.append({
-                        "role": "tool",
-                        "content": tool_result,
-                        "tool_call_id": tool_call.id
-                    })
-                    
-                    # 添加系统提示，限制模型只输出工具调用的结果
-                    current_messages.append({
-                        "role": "system",
-                        "content": "只专注于回答用户问题，不要发散讨论。直接提供工具调用结果的简明总结。不需要解释工具是如何被调用的，直接给出最终答案。"
-                    })
-                    
                     response = self.client.chat.completions.create(
-                        model = self.model,
-                        messages = current_messages,
-                        temperature = 0.3  # 使输出更加可控
+                        model=self.model,
+                        messages=current_messages,
+                        temperature=0.3  # 使输出更加可控
                     )
                     
                     # 更新历史消息
                     self._add_to_history(query, response.choices[0].message.content)
                     
                     return response.choices[0].message.content
+                else:
+                    # 模型没有选择调用工具，返回普通回复
+                    response_content = content.choices[0].message.content
+                    
+                    # 更新历史消息
+                    self._add_to_history(query, response_content)
+                    
+                    return response_content
             except Exception as e:
                 # 捕获工具调用中的异常
                 error_message = f"工具调用出错: {str(e)}"
                 print(f"\n[{error_message}]")
+                return f"处理请求时出错: {str(e)}"
+        
+        # 使用常规流程处理查询
+        try:
+            # 获取可用工具列表
+            response = await self.session.list_tools()
+            
+            # 构建可用工具列表
+            available_tools = [{"type": "function", 
+                               "function": {
+                                   "name": tool.name, 
+                                   "description": tool.description, 
+                                   "input_schema": tool.inputSchema
+                                   }
+                               } for tool in response.tools]
+            
+            content = self.client.chat.completions.create(
+                model=self.model,
+                messages=self.history_messages + [{"role": "user", "content": user_message}],
+                tools=available_tools,
+                tool_choice="auto"
+            )
+            
+            # 检查模型是否决定调用工具
+            if content.choices[0].finish_reason == "tool_calls":
+                # 获取工具调用信息
+                tool_call = content.choices[0].message.tool_calls[0]
+                tool_name = tool_call.function.name
+                tool_args = json.loads(tool_call.function.arguments)
                 
-                # 分析错误原因
-                error_analysis_messages = [
-                    {"role": "system", "content": "你是一个专注于分析工具调用异常的专家。请提供简明扼要的错误分析和具体可执行的解决方案。不要发散讨论。"},
-                    {"role": "user", "content": f"工具'{tool_name}'调用抛出异常：{str(e)}。原始调用参数：{json.dumps(tool_args)}。可用工具：{[t['function']['name'] for t in available_tools]}。请分析错误原因并提供具体解决方案。"}
+                print(f"\n\n[调用工具 {tool_name} 参数: {tool_args}]\n\n")
+                
+                # 调用工具
+                result = await self.session.call_tool(tool_name, tool_args)
+                tool_result = str(result.content[0].text)
+                
+                # 生成最终结果
+                current_messages = self.history_messages + [
+                    {"role": "user", "content": user_message},
+                    content.choices[0].message.model_dump(),
+                    {"role": "tool", "content": tool_result, "tool_call_id": tool_call.id}
                 ]
                 
-                error_analysis = self.client.chat.completions.create(
-                    model = self.model,
-                    messages = error_analysis_messages
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=current_messages,
+                    temperature=0.3  # 使输出更加可控
                 )
                 
-                analysis_result = error_analysis.choices[0].message.content
-                print(f"\n[Error analysis: {analysis_result}]")
+                # 更新历史消息
+                self._add_to_history(query, response.choices[0].message.content)
                 
-                # 生成新的消息进行重试
-                exception_messages = current_messages.copy()
-                exception_messages.append(content.message.model_dump())
-                exception_messages.append({
-                    "role": "system",
-                    "content": f"工具调用失败，出现异常：{str(e)}。请分析失败原因，并立即使用正确的参数重新调用工具。你必须使用工具，不要只给出分析。"
-                })
-                exception_messages.append({
-                    "role": "user", 
-                    "content": f"刚才的工具调用因异常失败了：{str(e)}。请分析原因并立即使用修正后的参数重新调用工具。"
-                })
+                return response.choices[0].message.content
+            else:
+                # 模型没有选择调用工具，返回普通回复
+                response_content = content.choices[0].message.content
                 
-                # 重新调用模型进行修正
-                exception_response = self.client.chat.completions.create(
-                    model = self.model,
-                    messages = exception_messages,
-                    temperature = 0.2,  # 降低温度，使回复更加可控和专注
-                    tools = available_tools,  # 提供工具列表
-                    tool_choice = "auto"  # 强制模型选择使用工具
-                )
+                # 更新历史消息
+                self._add_to_history(query, response_content)
                 
-                exception_content = exception_response.choices[0]
-                if exception_content.finish_reason == "tool_calls":
-                    # 处理重试的工具调用
-                    retry_tool_call = exception_content.message.tool_calls[0]
-                    retry_tool_name = retry_tool_call.function.name
-                    retry_tool_args = json.loads(retry_tool_call.function.arguments)
-                    
-                    print(f"\n\n[Retrying tool {retry_tool_name} with args {retry_tool_args}]\n\n")
-                    
-                    try:
-                        retry_result = await self.session.call_tool(retry_tool_name, retry_tool_args)
-                        retry_tool_result = str(retry_result.content[0].text)
-                        
-                        # 检查重试结果是否成功
-                        english_indicators = ["error", "exception", "failed"]
-                        chinese_indicators = ["失败", "不存在", "无法", "错误", "未找到", "无效", "请检查", "请确认", "不正确"]
-                        
-                        is_english_failed = any(indicator in retry_tool_result.lower() for indicator in english_indicators)
-                        is_chinese_failed = any(indicator in retry_tool_result for indicator in chinese_indicators)
-                        
-                        if is_english_failed or is_chinese_failed:
-                            print(f"\n[Retry tool call failed: {retry_tool_result}]")
-                            raise Exception(f"重试工具调用依然失败: {retry_tool_result}")
-                            
-                        # 更新消息
-                        exception_messages.append(exception_content.message.model_dump())
-                        exception_messages.append({
-                            "role": "tool",
-                            "content": retry_tool_result,
-                            "tool_call_id": retry_tool_call.id
-                        })
-                        
-                        # 最终响应
-                        final_response = self.client.chat.completions.create(
-                            model = self.model,
-                            messages = exception_messages
-                        )
-                        
-                        # 更新历史消息
-                        self._add_to_history(query, final_response.choices[0].message.content)
-                        
-                        return final_response.choices[0].message.content
-                    except Exception as retry_error:
-                        # 如果重试仍然失败，返回错误信息
-                        final_error_message = f"工具调用重试失败: {str(retry_error)}"
-                        print(f"\n[{final_error_message}]")
-                        
-                        exception_messages.append({
-                            "role": "system",
-                            "content": f"{final_error_message}。请再尝试一次，修正参数后必须重新调用工具。"
-                        })
-                        exception_messages.append({
-                            "role": "user",
-                            "content": "请仔细检查参数并再次尝试，必须使用正确的工具和参数。"
-                        })
-                        
-                        final_retry_response = self.client.chat.completions.create(
-                            model = self.model,
-                            messages = exception_messages,
-                            temperature = 0.2,  # 降低温度，使回复更加可控和专注
-                            tools = available_tools,  # 提供工具列表
-                            tool_choice = "auto"  # 强制模型选择使用工具
-                        )
-                        
-                        final_retry_content = final_retry_response.choices[0]
-                        if final_retry_content.finish_reason == "tool_calls":
-                            # 处理最终重试的工具调用
-                            final_tool_call = final_retry_content.message.tool_calls[0]
-                            final_tool_name = final_tool_call.function.name
-                            final_tool_args = json.loads(final_tool_call.function.arguments)
-                            
-                            print(f"\n\n[Final retry tool {final_tool_name} with args {final_tool_args}]\n\n")
-                            
-                            try:
-                                final_result = await self.session.call_tool(final_tool_name, final_tool_args)
-                                final_tool_result = str(final_result.content[0].text)
-                                
-                                # 检查最终重试结果是否成功
-                                english_indicators = ["error", "exception", "failed"]
-                                chinese_indicators = ["失败", "不存在", "无法", "错误", "未找到", "无效", "请检查", "请确认", "不正确"]
-                                
-                                is_english_failed = any(indicator in final_tool_result.lower() for indicator in english_indicators)
-                                is_chinese_failed = any(indicator in final_tool_result for indicator in chinese_indicators)
-                                
-                                if is_english_failed or is_chinese_failed:
-                                    print(f"\n[Final retry tool call failed: {final_tool_result}]")
-                                    
-                                    # 更新历史消息
-                                    self._add_to_history(query, f"工具调用多次失败。最终错误：{final_tool_result}")
-                                    
-                                    return f"工具调用多次失败。最终错误：{final_tool_result}"
-                                
-                                # 更新消息
-                                exception_messages.append(final_retry_content.message.model_dump())
-                                exception_messages.append({
-                                    "role": "tool",
-                                    "content": final_tool_result,
-                                    "tool_call_id": final_tool_call.id
-                                })
-                                
-                                # 最终响应
-                                final_response = self.client.chat.completions.create(
-                                    model = self.model,
-                                    messages = exception_messages,
-                                    temperature = 0.3
-                                )
-                                
-                                # 更新历史消息
-                                self._add_to_history(query, final_response.choices[0].message.content)
-                                
-                                return final_response.choices[0].message.content
-                            except Exception as last_error:
-                                error_result = f"工具调用多次失败。最终错误：{str(last_error)}。请检查参数并手动重试。"
-                                
-                                # 更新历史消息
-                                self._add_to_history(query, error_result)
-                                
-                                return error_result
-                        
-                        error_response = self.client.chat.completions.create(
-                            model = self.model,
-                            messages = exception_messages,
-                            temperature = 0.2  # 降低温度，使回复更加可控和专注
-                        )
-                        
-                        # 更新历史消息
-                        self._add_to_history(query, error_response.choices[0].message.content)
-                        
-                        return error_response.choices[0].message.content
-                else:
-                    # 重试没有进行工具调用
-                    
-                    # 更新历史消息
-                    self._add_to_history(query, exception_content.message.content)
-                    
-                    return exception_content.message.content
-        
-        # 更新历史消息
-        self._add_to_history(query, content.message.content)
-        
-        return content.message.content
+                return response_content
+        except Exception as e:
+            # 捕获工具调用中的异常
+            error_message = f"工具调用出错: {str(e)}"
+            print(f"\n[{error_message}]")
+            return f"处理请求时出错: {str(e)}"
 
-    async def chat_loop(self):
-        """聊天循环"""
-        print("\n MCP 客户端已启动，输入'quit'退出")
-        print(" 支持上下文记忆功能，会记住您之前的命令")
-        
-        while True:
-            try:
-                # 显示当前会话状态（有多少历史记录）
-                history_count = len(self.command_history)
-                if history_count > 0:
-                    print(f"\n[当前会话已记录 {history_count} 条命令历史]")
-                
-                query = input("\nQuery: ").strip()
-                if query.lower() == 'quit':
-                    break
-                elif query.lower() == 'history':
-                    # 显示历史命令
-                    print("\n历史命令记录:")
-                    for i, cmd in enumerate(self.command_history, 1):
-                        print(f"{i}. {cmd}")
-                    continue
-                elif query.lower() == 'clear history':
-                    # 清除历史命令
-                    self.command_history = []
-                    self.history_messages = [
-                        {"role": "system", "content": "你是一个专注于执行工具调用的助手。如果工具调用成功，直接报告结果，不要发散讨论。如果工具调用失败，明确分析失败原因并提出精确的修复方案。保持回答简洁明了。"}
-                    ]
-                    print("\n已清除所有历史记录")
-                    continue
-                
-                print(f"\n [Mock Response] Your request： {query}")
-                
-                # 获取响应
-                response = await self.process_query(query)
-                if response is None:
-                    continue
-                
-                print("\n [Mock Response] Assistant: ", end="", flush=True)
-                print(response)
-                
-            except Exception as e:
-                print(f"\n Error： {str(e)}")
-    
     async def cleanup(self):
         """清理资源"""
-        if self.exit_stack:
-            await self.exit_stack.aclose()
-            
-async def main():
-    if len(sys.argv) < 2:
-        print("\nUsage: python client.py <server_script_path>")
-        sys.exit(1)
-    
-    client = MCPClient()
-    try:
-        await client.connect_to_server(sys.argv[1])
-        await client.chat_loop()
-    finally:
-        await client.cleanup()
+        if not hasattr(self, 'exit_stack'):
+            return
         
-if __name__ == "__main__":
-    asyncio.run(main())
+        try:
+            # 首先确保所有子任务都被取消
+            if hasattr(self, '_cleanup_pending_tasks'):
+                try:
+                    await self._cleanup_pending_tasks()
+                except Exception as e:
+                    print(f"取消待处理任务时出错: {str(e)}")
+            
+            # 然后关闭exit_stack
+            try:
+                # 使用超时机制关闭exit_stack，避免无限等待
+                await asyncio.wait_for(self._close_exit_stack(), timeout=3.0)
+            except asyncio.TimeoutError:
+                print("警告: exit_stack关闭超时")
+            except asyncio.CancelledError:
+                # 处理取消情况但继续尝试关闭资源
+                print("注意: 清理过程中发生取消操作")
+                # 强制关闭但不引发异常
+                try:
+                    self._force_close_resources()
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"关闭exit_stack时出错: {str(e)}")
+        except Exception as e:
+            print(f"清理资源时出错: {str(e)}")
+        finally:
+            # 确保资源引用被清除
+            if hasattr(self, 'exit_stack'):
+                self.exit_stack = None
+            if hasattr(self, 'ws'):
+                self.ws = None 
+            if hasattr(self, 'process'):
+                self.process = None
+
+    async def _close_exit_stack(self):
+        """安全地关闭exit_stack"""
+        if hasattr(self, 'exit_stack'):
+            try:
+                await self.exit_stack.aclose()
+            finally:
+                self.exit_stack = None
+
+    def _force_close_resources(self):
+        """强制关闭资源，用于紧急情况"""
+        # 强制关闭进程
+        if hasattr(self, 'process') and self.process:
+            if hasattr(self.process, 'returncode') and self.process.returncode is None:
+                try:
+                    self.process.kill()
+                except Exception:
+                    pass
+            self.process = None
+        
+        # 强制关闭websocket
+        if hasattr(self, 'ws') and self.ws:
+            try:
+                self.ws.close_connection()
+            except Exception:
+                pass
+            self.ws = None
+
+    async def _cleanup_pending_tasks(self):
+        """取消所有待处理的任务"""
+        if not hasattr(self, '_task_group') or not self._task_group:
+            return
+        
+        # 尝试优雅地取消任务组内的任务
+        try:
+            await self._task_group.cancel_scope.cancel()
+        except Exception:
+            # 忽略任何错误
+            pass
