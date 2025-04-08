@@ -62,10 +62,18 @@ async def lifespan(app: FastAPI):
         if planner is None:
             load_dotenv()
             planner = TaskPlanner()
-            # 使用默认服务器路径或启用的服务器
-            connected = await planner.connect_to_server()
-            if not connected:
-                print("\n无法连接到服务器，程序可能无法正常运行")
+            # 加载所有启用的服务器接口
+            try:
+                connected = await planner.connect_to_server()
+                if not connected:
+                    print("\n无法连接到任何启用的服务器，程序可能无法正常运行")
+            except KeyboardInterrupt:
+                print("\n检测到Ctrl+C，初始化过程已中断")
+                # 重新引发KeyboardInterrupt，将异常传递给调用者
+                raise
+    except KeyboardInterrupt:
+        print("\n检测到Ctrl+C，初始化过程已中断")
+        raise  # 重新引发异常，让FastAPI框架处理
     except Exception as e:
         print(f"\n初始化过程中出现错误: {str(e)}")
     
@@ -216,12 +224,15 @@ async def stream_completion(user_request: str, model: str):
                 print("\n执行总结:")
                 print(summary)
                 
+            except KeyboardInterrupt:
+                queue.put_nowait("\n检测到Ctrl+C，任务执行被中断")
+                return
             except Exception as e:
                 traceback_str = traceback.format_exc()
                 queue.put_nowait(f"\n处理请求时出现错误: {str(e)}\n{traceback_str}")
         
         # 启动执行任务
-        asyncio.create_task(execute())
+        execute_task = asyncio.create_task(execute())
         
         # 流式返回捕获的输出
         while True:
@@ -235,14 +246,32 @@ async def stream_completion(user_request: str, model: str):
                             await asyncio.sleep(0.01)  # 短暂延迟以防止过快发送
             except asyncio.TimeoutError:
                 # 检查执行任务是否完成
-                if queue.empty():
+                if queue.empty() and (execute_task.done() or execute_task.cancelled()):
                     # 发送完成信号
                     yield f"data: {json.dumps({'id': f'chatcmpl-{uuid.uuid4()}', 'object': 'chat.completion.chunk', 'created': int(asyncio.get_event_loop().time()), 'model': model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
                     yield "data: [DONE]\n\n"
                     break
+            except KeyboardInterrupt:
+                # 处理流式传输过程中的Ctrl+C
+                execute_task.cancel()
+                yield f"data: {json.dumps({'id': f'chatcmpl-{uuid.uuid4()}', 'object': 'chat.completion.chunk', 'created': int(asyncio.get_event_loop().time()), 'model': model, 'choices': [{'index': 0, 'delta': {'content': '\n检测到Ctrl+C，流式传输已中断\n'}, 'finish_reason': None}]})}\n\n"
+                yield f"data: {json.dumps({'id': f'chatcmpl-{uuid.uuid4()}', 'object': 'chat.completion.chunk', 'created': int(asyncio.get_event_loop().time()), 'model': model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+                yield "data: [DONE]\n\n"
+                break
+    except KeyboardInterrupt:
+        # 处理整体流程中的Ctrl+C
+        yield f"data: {json.dumps({'id': f'chatcmpl-{uuid.uuid4()}', 'object': 'chat.completion.chunk', 'created': int(asyncio.get_event_loop().time()), 'model': model, 'choices': [{'index': 0, 'delta': {'content': '\n检测到Ctrl+C，流式传输已中断\n'}, 'finish_reason': None}]})}\n\n"
+        yield f"data: {json.dumps({'id': f'chatcmpl-{uuid.uuid4()}', 'object': 'chat.completion.chunk', 'created': int(asyncio.get_event_loop().time()), 'model': model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+        yield "data: [DONE]\n\n"
     finally:
         # 取消订阅
         output_capture.unsubscribe(sub_id)
+        # 确保任务被取消
+        try:
+            if 'execute_task' in locals() and not (execute_task.done() or execute_task.cancelled()):
+                execute_task.cancel()
+        except:
+            pass
 
 def parse_arguments():
     """解析命令行参数"""
@@ -264,33 +293,38 @@ async def run_cli_mode(query=None):
     global planner
     
     if query:
-        # 直接执行指定查询
-        print(f"\n执行查询: {query}")
         try:
-            # 规划任务
-            tasks = await planner.plan_tasks(query)
-            
-            if not tasks:
-                print("\n未能从请求中提取出具体任务，请尝试更明确的描述")
-                return
+            # 直接执行指定查询
+            print(f"\n执行查询: {query}")
+            try:
+                # 规划任务
+                tasks = await planner.plan_tasks(query)
                 
-            print(f"\n已将请求拆解为 {len(tasks)} 个任务:")
-            for i, task in enumerate(tasks, 1):
-                print(f"{i}. {task}")
+                if not tasks:
+                    print("\n未能从请求中提取出具体任务，请尝试更明确的描述")
+                    return
+                    
+                print(f"\n已将请求拆解为 {len(tasks)} 个任务:")
+                for i, task in enumerate(tasks, 1):
+                    print(f"{i}. {task}")
+                    
+                # 执行任务
+                results = await planner.execute_tasks(tasks)
                 
-            # 执行任务
-            results = await planner.execute_tasks(tasks)
-            
-            # 生成总结
-            print("\n所有任务已执行完毕，正在生成总结...")
-            summary = await planner.summarize_results(query, tasks, results)
-            
-            print("\n执行总结:")
-            print(summary)
-        except Exception as e:
-            print(f"\n执行过程中出现错误: {str(e)}")
-            traceback_str = traceback.format_exc()
-            print(traceback_str)
+                # 生成总结
+                print("\n所有任务已执行完毕，正在生成总结...")
+                summary = await planner.summarize_results(query, tasks, results)
+                
+                print("\n执行总结:")
+                print(summary)
+            except Exception as e:
+                print(f"\n执行过程中出现错误: {str(e)}")
+                traceback_str = traceback.format_exc()
+                print(traceback_str)
+        except KeyboardInterrupt:
+            print("\n检测到Ctrl+C，正在退出程序...")
+            print("\n感谢使用，再见！")
+            return
     else:
         # 进入交互式模式
         await interactive_mode(planner)
@@ -439,10 +473,11 @@ async def main_async():
                 print(f"无法连接到指定的服务器: {args.server}")
                 return
         else:
-            # 连接默认服务器
+            # 连接所有启用的服务器
+            print("正在加载所有启用的服务器接口...")
             connected = await planner.connect_to_server()
             if not connected:
-                print("无法连接到默认服务器")
+                print("无法连接到任何启用的服务器")
                 return
         
         # 使用CLI模式
@@ -457,7 +492,8 @@ async def main_async():
         traceback_str = traceback.format_exc()
         print(traceback_str)
     except KeyboardInterrupt:
-        print("\n检测到键盘中断，程序即将退出...")
+        print("\n检测到Ctrl+C，程序即将退出...")
+        print("\n感谢使用，再见！")
     finally:
         # 在异步环境中清理资源
         if planner:
@@ -489,25 +525,40 @@ def main():
         loop.run_until_complete(main_async())
     except KeyboardInterrupt:
         print("\n程序被用户中断")
+        print("\n正在清理资源...")
     except Exception as e:
         print(f"\n程序运行出错: {str(e)}")
         traceback.print_exc()
     finally:
         # 关闭事件循环前确保所有待处理的任务都已完成
-        pending = asyncio.all_tasks(loop)
-        for task in pending:
-            task.cancel()
-            
-        # 允许任务有机会处理取消
-        if pending:
+        try:
+            # 获取所有任务前首先检查循环是否已关闭
+            if not loop.is_closed():
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                
+                # 允许任务有机会处理取消
+                if pending:
+                    try:
+                        # 等待所有任务处理它们的取消
+                        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                    except Exception as e:
+                        print(f"关闭待处理任务时出错: {str(e)}")
+                    except KeyboardInterrupt:
+                        # 如果在关闭过程中再次按下Ctrl+C，不显示错误信息
+                        pass
+                
+                # 最后关闭事件循环
+                loop.close()
+        except Exception as e:
+            print(f"关闭事件循环时出错: {str(e)}")
+            # 尝试强制关闭循环
             try:
-                # 等待所有任务处理它们的取消
-                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-            except Exception as e:
-                print(f"关闭待处理任务时出错: {str(e)}")
-        
-        # 最后关闭事件循环
-        loop.close()
+                if not loop.is_closed():
+                    loop.close()
+            except:
+                pass
 
 async def manage_servers_interactive(planner: TaskPlanner):
     """服务器管理交互界面"""
@@ -622,7 +673,7 @@ async def list_servers(planner: TaskPlanner):
 async def interactive_mode(planner: TaskPlanner):
     """交互式命令行模式"""
     print("\n欢迎使用Deepin MCP 任务规划系统")
-    print("使用 'quit' 退出，'servers' 管理服务器，'switch' 切换服务器")
+    print("使用 'quit' 退出，'servers' 管理服务器")
     
     while True:
         try:
@@ -634,10 +685,6 @@ async def interactive_mode(planner: TaskPlanner):
                 
             if user_request.lower() == 'servers':
                 await list_servers(planner)
-                continue
-                
-            if user_request.lower() == 'switch':
-                await switch_server_interactive(planner)
                 continue
                 
             if not user_request:
@@ -672,45 +719,13 @@ async def interactive_mode(planner: TaskPlanner):
             print(summary)
             
         except KeyboardInterrupt:
-            print("\n操作已取消")
+            print("\n检测到Ctrl+C，正在退出程序...")
+            print("\n感谢使用，再见！")
+            return  # 直接返回以退出函数
         except Exception as e:
             print(f"\n执行过程中出现错误: {str(e)}")
             traceback_str = traceback.format_exc()
             print(traceback_str)
-
-async def switch_server_interactive(planner: TaskPlanner):
-    """交互式切换服务器"""
-    server_status = planner.get_server_status()
-    enabled_servers = {name: info for name, info in server_status.items() if info.get("enabled", True)}
-    
-    if not enabled_servers:
-        print("\n未找到任何启用的服务器")
-        return
-        
-    print("\n可选的服务器:")
-    server_names = list(enabled_servers.keys())
-    for i, server_name in enumerate(server_names, 1):
-        server_info = enabled_servers[server_name]
-        current_indicator = " (当前使用)" if server_info["path"] == planner.server_path else ""
-        default_indicator = " (默认)" if server_name == planner.server_config["config"]["default_server"] else ""
-        print(f"{i}. {server_name}{current_indicator}{default_indicator} - {server_info['description']}")
-    
-    server_choice = input("\n请选择要切换的服务器 (输入编号): ").strip()
-    try:
-        choice_index = int(server_choice) - 1
-        if 0 <= choice_index < len(server_names):
-            selected_server = server_names[choice_index]
-            
-            # 切换服务器
-            result = await planner.switch_server(selected_server)
-            if result:
-                print(f"\n已成功切换到服务器: {selected_server}")
-            else:
-                print(f"\n切换服务器失败")
-        else:
-            print("\n无效的选择，未进行切换")
-    except ValueError:
-        print("\n无效的输入，未进行切换")
 
 if __name__ == "__main__":
     main() 
