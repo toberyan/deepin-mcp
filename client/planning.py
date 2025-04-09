@@ -415,30 +415,38 @@ class TaskPlanner:
         print(f"\n未找到服务器 '{server_name}'")
         return False
 
-    async def plan_tasks(self, user_request: str) -> List[str]:
+    async def plan_tasks(self, user_request: str) -> List[Dict[str, Any]]:
         """
-        将用户请求拆分为多个按时间顺序执行的任务
+        将用户请求拆分为多个按时间顺序执行的原子任务，并为每个任务标识最适合的工具类型
         
         Args:
             user_request: 用户输入的请求
             
         Returns:
-            List[str]: 任务列表
+            List[Dict[str, Any]]: 任务列表，每个任务包含描述和推荐工具类型
         """
         messages = [
             {
                 "role": "system", 
-                "content": """你是一个专业的任务分解助手。你的工作是将用户的复杂请求拆解为可以按顺序执行的具体任务列表。
+                "content": """你是一个专业的任务分解助手。你的工作是将用户的复杂请求拆解为可以按顺序执行的具体原子任务列表，并为每个任务推荐最适合的工具类型。
                 请遵循以下规则：
-                1. 将复杂请求分解为3-8个简单、明确的步骤
-                2. 将输入内容全部理解并翻译为 Linux bash 命令。如果涉及到打开文件操作，请使用xdg-open命令。请不要解释命令功能，只输出命令本身。格式为：CMD:实际命令。例如对于'显示当前目录'，只需返回'CMD:ls'。对于复杂命令，如果需要使用shell特性（如管道、重定向），应添加参数'use_shell:true'，例如：'CMD:ls -la | grep .txt;use_shell:true
-                3. 步骤之间应该有清晰的先后顺序关系
+                1. 将复杂请求分解为3-8个简单、明确的原子任务
+                2. 每个任务必须具体、明确，便于后续处理
+                3. 为每个任务标识最适合的工具类型，可能的类型包括：
+                   - bash: 适合文件操作、系统命令等
+                   - weather: 适合天气查询
+                   - calendar: 适合日历和时间管理操作
+                   - email: 适合发送和管理邮件
+                   - web: 适合网络搜索和浏览
+                   - database: 适合数据库操作
+                   - media: 适合媒体文件处理
+                   - document: 适合文档处理
+                   - general: 通用任务，无明确类别
                 4. 每个步骤应该是可独立执行的
-                5. 不要包含解释或分析，只提供步骤列表
-                6. 每个步骤必须明确指出操作的对象（文件、目录等）
-                7. 如果后续步骤依赖于前面步骤的结果，必须明确指出
-                8. 以JSON格式返回，格式为：{"tasks": ["任务1", "任务2", "任务3", ...]}
-                9. 不要使用Markdown格式化，直接返回原始JSON
+                5. 步骤之间应该有清晰的先后顺序关系
+                6. 如果后续步骤依赖于前面步骤的结果，必须明确指出
+                7. 以JSON格式返回，格式为：{"tasks": [{"description": "任务1描述", "tool_type": "工具类型1"}, {"description": "任务2描述", "tool_type": "工具类型2"}, ...]}
+                8. 不要使用Markdown格式化，直接返回原始JSON
                 """
             },
             {"role": "user", "content": f"请将以下请求拆解为具体的执行步骤：{user_request}"}
@@ -473,43 +481,8 @@ class TaskPlanner:
             print(f"解析JSON失败: {content}")
             print(f"错误详情: {str(e)}")
             
-            # 尝试更强大的解析方法
-            try:
-                # 1. 尝试使用正则表达式直接提取tasks数组
-                import re
-                tasks_match = re.search(r'"tasks"\s*:\s*\[(.*?)\]', cleaned_content, re.DOTALL)
-                if tasks_match:
-                    tasks_str = tasks_match.group(1)
-                    # 提取数组中的字符串
-                    task_list = re.findall(r'"([^"]*?)"', tasks_str)
-                    if task_list:
-                        return task_list
-                
-                # 2. 如果第一种方法失败，尝试找到所有命令格式的字符串
-                cmd_list = re.findall(r'CMD:(.*?)(?:;|"|$)', cleaned_content)
-                if cmd_list:
-                    return [f"CMD:{cmd.strip()}" for cmd in cmd_list]
-                
-                # 3. 尝试提取任何看起来像任务的字符串
-                tasks = re.findall(r'\[(.*?)\]', cleaned_content)
-                if tasks:
-                    # 提取数组中的字符串
-                    task_list = re.findall(r'"([^"]+)"', tasks[0])
-                    if task_list:
-                        return task_list
-                
-                # 4. 最后尝试，直接匹配引号中的内容，排除常见的JSON键名
-                tasks = re.findall(r'"([^"]+)"', cleaned_content)
-                if tasks:
-                    # 过滤掉常见的JSON键名
-                    filtered_tasks = [task for task in tasks if task.lower() not in ['tasks', 'task', 'steps', 'step']]
-                    if filtered_tasks:
-                        return filtered_tasks
-            except Exception as parse_error:
-                print(f"额外解析尝试失败: {str(parse_error)}")
-            
-            # 所有方法都失败，将整个请求作为一个任务
-            return [user_request]
+            # 所有解析方法失败，将整个请求作为一个通用任务
+            return [{"description": user_request, "tool_type": "general"}]
 
     async def connect_to_server(self) -> bool:
         """
@@ -609,12 +582,12 @@ class TaskPlanner:
             print(f"\n连接服务器过程中出现错误: {str(e)}")
             return False
 
-    async def execute_task(self, task: str) -> str:
+    async def execute_task(self, task: Dict[str, Any]) -> str:
         """
-        执行单个任务
+        执行单个任务，根据任务类型选择最合适的工具
         
         Args:
-            task: 要执行的任务
+            task: 要执行的任务，包含description和tool_type
             
         Returns:
             str: 任务执行结果
@@ -626,19 +599,44 @@ class TaskPlanner:
                 if not connected:
                     return "错误: 未连接到任何服务器"
             
+            task_description = task["description"]
+            tool_type = task["tool_type"]
+            
+            print(f"\n执行任务: {task_description}")
+            print(f"推荐工具类型: {tool_type}")
+            
+            # 根据任务类型筛选合适的工具
+            suitable_tools = []
+            
+            # 如果有特定的工具类型，优先考虑该类型的工具
+            if tool_type != "general":
+                for tool in self.all_tools:
+                    # 检查工具名称是否与工具类型匹配
+                    # 格式为 "server_name.tool_name"
+                    server_name = tool.name.split('.')[0] if '.' in tool.name else ""
+                    if server_name.lower() == tool_type.lower() or tool_type.lower() in tool.name.lower():
+                        suitable_tools.append(tool)
+            
+            # 如果没有找到匹配的工具或者是通用任务，使用所有工具
+            if not suitable_tools:
+                suitable_tools = self.all_tools
+                
             # 使用适当的服务器客户端处理查询
-            # 注：mcp_client 只是为了向后兼容
-            result = await self.mcp_client.process_query(task, self.all_tools, self.connected_servers)
+            result = await self.mcp_client.process_query(
+                task_description, 
+                suitable_tools, 
+                self.connected_servers
+            )
             return result
         except Exception as e:
             return f"执行任务失败: {str(e)}"
 
-    async def execute_tasks(self, tasks: List[str]) -> Dict[str, str]:
+    async def execute_tasks(self, tasks: List[Dict[str, Any]]) -> Dict[str, str]:
         """
         依次执行任务列表
         
         Args:
-            tasks: 任务列表
+            tasks: 任务列表，每个任务包含description和tool_type
             
         Returns:
             Dict[str, str]: 任务执行结果字典
@@ -648,23 +646,23 @@ class TaskPlanner:
         # 创建任务执行进度显示
         print(f"\n总计 {len(tasks)} 个任务待执行:\n")
         for i, task in enumerate(tasks, 1):
-            print(f"{i}. [ ] {task}")
+            print(f"{i}. [ ] {task['description']} (推荐工具: {task['tool_type']})")
         
         # 依次执行任务
         for i, task in enumerate(tasks, 1):
-            print(f"\n正在执行任务 {i}/{len(tasks)}: {task}")
+            print(f"\n正在执行任务 {i}/{len(tasks)}: {task['description']}")
             result = await self.execute_task(task)
-            results[task] = result
+            results[task['description']] = result
             
             # 更新任务状态
             print("\n任务执行状态:")
             for j, t in enumerate(tasks, 1):
                 status = "✓" if j <= i else " "
-                print(f"{j}. [{status}] {t}")
+                print(f"{j}. [{status}] {t['description']}")
         
         return results
 
-    async def summarize_results(self, user_request: str, tasks: List[str], results: Dict[str, str]) -> str:
+    async def summarize_results(self, user_request: str, tasks: List[Dict[str, Any]], results: Dict[str, str]) -> str:
         """
         汇总任务执行结果
         
@@ -680,10 +678,10 @@ class TaskPlanner:
 用户原始请求: {user_request}
 
 执行的任务:
-{chr(10).join([f"{i+1}. {task}" for i, task in enumerate(tasks)])}
+{chr(10).join([f"{i+1}. {task['description']} (工具类型: {task['tool_type']})" for i, task in enumerate(tasks)])}
 
 每个任务的结果:
-{chr(10).join([f"任务 {i+1}: {results[task]}" for i, task in enumerate(tasks)])}
+{chr(10).join([f"任务 {i+1}: {results[task['description']]}" for i, task in enumerate(tasks)])}
 
 请为用户提供一个简洁、全面的总结，说明完成了什么任务、取得了什么成果，以及可能的后续步骤。请使用第一人称，就好像你就是执行任务的助手。
 """
@@ -779,7 +777,7 @@ async def main():
     
     try:
         print("\n欢迎使用任务规划执行系统")
-        print("这个系统会将您的请求拆解为多个任务，并依次执行")
+        print("这个系统会将您的请求拆解为多个原子任务，并为每个任务自动选择最合适的工具执行")
         
         # 连接服务器
         connected = await planner.connect_to_server()
@@ -807,7 +805,7 @@ async def main():
                 
             print(f"\n已将您的请求拆解为 {len(tasks)} 个任务:")
             for i, task in enumerate(tasks, 1):
-                print(f"{i}. {task}")
+                print(f"{i}. {task['description']} (推荐工具类型: {task['tool_type']})")
                 
             # 确认是否执行
             confirm = input("\n是否执行这些任务? (y/n): ").strip().lower()
