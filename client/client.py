@@ -1,6 +1,5 @@
 import asyncio
 import os
-import sys
 import json
 from typing import Optional
 
@@ -22,14 +21,13 @@ class MCPClient:
         self.model = os.getenv("MODEL")
         
         if not self.openai_api_key:
-            raise ValueError(f"\nOPENAI_API_KEY 未设置")
+            raise ValueError("\nOPENAI_API_KEY 未设置")
         
         self.client = OpenAI(
             api_key=self.openai_api_key,
             base_url=self.base_url
         )
         self.session: Optional[ClientSession] = None
-        self.exit_stack = AsyncExitStack()
         
         # 添加历史消息列表，用于存储对话历史
         self.history_messages = [
@@ -40,21 +38,15 @@ class MCPClient:
         # 设置历史记录最大长度
         self.max_history_length = 10
         
-        # 从环境变量获取命令间隔时间(毫秒)，默认为100ms
+        # 从环境变量获取命令间隔时间(毫秒)，默认为10ms
         try:
-            self.command_delay = float(os.getenv("COMMAND_DELAY_MS", "100")) / 1000.0
+            self.command_delay = float(os.getenv("COMMAND_DELAY_MS", "10")) / 1000.0
         except ValueError:
-            print(f"\n警告: COMMAND_DELAY_MS 环境变量格式不正确，使用默认值100ms")
+            print("\n警告: COMMAND_DELAY_MS 环境变量格式不正确，使用默认值100ms")
             self.command_delay = 0.1
         
     def _add_to_history(self, query: str, response: str):
-        """
-        添加一对对话到历史记录
-        
-        Args:
-            query: 用户查询
-            response: 助手响应
-        """
+        """添加一对对话到历史记录"""
         self.history_messages.append({"role": "user", "content": query})
         self.history_messages.append({"role": "assistant", "content": response})
         self._manage_history_size()
@@ -66,8 +58,7 @@ class MCPClient:
             self.command_history = self.command_history[-self.max_history_length:]
             
         # 保持消息历史在合理范围内
-        # 保留系统消息和最近的对话
-        if len(self.history_messages) > (self.max_history_length * 2 + 1):  # 系统消息 + (用户+助手) * max_length
+        if len(self.history_messages) > (self.max_history_length * 2 + 1):
             # 保留系统消息
             system_messages = [msg for msg in self.history_messages if msg["role"] == "system"]
             # 保留最近的对话
@@ -79,34 +70,21 @@ class MCPClient:
         """连接到服务器"""
         # 检查是否是shell命令（来自run_server.sh脚本）
         if server_script_path.endswith("run_server.sh") or " " in server_script_path:
-            # 如果是shell命令，直接使用命令运行
             command_parts = server_script_path.split()
-            if len(command_parts) > 1:
-                command = command_parts[0]  # 脚本路径
-                args = command_parts[1:]    # 参数
-            else:
-                command = server_script_path
-                args = []
+            command = command_parts[0] if len(command_parts) > 1 else server_script_path
+            args = command_parts[1:] if len(command_parts) > 1 else []
                 
-            server_params = StdioServerParameters(
-                command=command,
-                args=args,
-                env=None
-            )
+            server_params = StdioServerParameters(command=command, args=args, env=None)
         else:
             # 正常的Python或JS文件处理
             is_python = server_script_path.endswith(".py") or server_script_path.endswith(".wrapper.py")
             is_js = server_script_path.endswith(".js")
             
             if not (is_python or is_js):
-                raise ValueError(f"\n服务器脚本必须是Python或JavaScript文件")
+                raise ValueError("\n服务器脚本必须是Python或JavaScript文件")
             
             command = "python" if is_python else "node"
-            server_params = StdioServerParameters(
-                command=command,
-                args=[server_script_path],
-                env=None
-            )
+            server_params = StdioServerParameters(command=command, args=[server_script_path], env=None)
         
         # 创建stdio客户端
         stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
@@ -115,12 +93,10 @@ class MCPClient:
         
         await self.session.initialize()
         
-        # 获取服务器信息
-        
         # 获取工具列表
         response = await self.session.list_tools()
         tools = response.tools
-        print(f"\n已链接到服务器， 可用的工具：", [tool.name for tool in tools])
+        print("\n已链接到服务器， 可用的工具：", [tool.name for tool in tools])
         
     async def process_query(self, query: str, all_tools=None, connected_servers=None) -> str:
         # 记录用户的原始查询
@@ -135,14 +111,11 @@ class MCPClient:
                 history_context += f"{i}. {cmd}\n"
             history_context += "\n请参考上述历史查询，理解用户可能的意图。"
         
-        # 记录重试次数
-        retry_count = 0
-        max_retries = 3
-        
+        # 将用户查询翻译为bash命令
         trans_messages = [
             {"role": "system", "content": f"你是Linux命令行大师，将输入内容全部理解并翻译为 Linux bash 命令。如果涉及到打开文件操作，请使用xdg-open命令。请不要解释命令功能，只输出命令本身。格式为：CMD:实际命令。例如对于'显示当前目录'，只需返回'CMD:ls'。对于复杂命令，如果需要使用shell特性（如管道、重定向），应添加参数'use_shell:true'，例如：'CMD:ls -la | grep .txt;use_shell:true'。{history_context if history_context else ''}"},
-            {"role": "user", "content": query}]
-        # 先将用户查询翻译为bash命令
+            {"role": "user", "content": query}
+        ]
         translation_response = self.client.chat.completions.create(
             model=self.model,
             messages=trans_messages
@@ -158,21 +131,14 @@ class MCPClient:
             # 提取命令部分
             cmd_parts = translated_content.split("CMD:", 1)[1].strip()
             
-            # 检查是否有多条命令（使用分号分隔）
-            commands = []
-            use_shell = False
-            
             # 检查是否有use_shell参数
+            use_shell = False
             if ";use_shell:true" in cmd_parts.lower():
                 use_shell = True
                 cmd_parts = cmd_parts.split(";use_shell:", 1)[0].strip()
             
             # 处理多条命令的情况（用分号分隔的多条命令）
-            if ";" in cmd_parts and not use_shell:
-                commands = [cmd.strip() for cmd in cmd_parts.split(";") if cmd.strip()]
-            else:
-                # 单个命令或者需要shell执行的复杂命令
-                commands = [cmd_parts]
+            commands = [cmd.strip() for cmd in cmd_parts.split(";") if cmd.strip()] if ";" in cmd_parts and not use_shell else [cmd_parts]
             
             # 自动执行命令
             if len(commands) > 1:
@@ -185,12 +151,12 @@ class MCPClient:
                 
                 # 构建可用工具列表
                 available_tools = [{"type": "function", 
-                                   "function": {
-                                       "name": tool.name, 
-                                       "description": tool.description, 
-                                       "input_schema": tool.inputSchema
-                                       }
-                                   } for tool in response.tools]
+                                  "function": {
+                                      "name": tool.name, 
+                                      "description": tool.description, 
+                                      "input_schema": tool.inputSchema
+                                      }
+                                  } for tool in response.tools]
                 
                 # 查找run_bash工具
                 bash_tool = None
@@ -204,21 +170,13 @@ class MCPClient:
                     
                     for i, command_str in enumerate(commands):
                         # 分解命令和参数
-                        if " " in command_str:
-                            command = command_str.split(" ", 1)[0]
-                            args = command_str.split(" ", 1)[1]
-                        else:
-                            command = command_str
-                            args = ""
+                        command = command_str.split(" ", 1)[0] if " " in command_str else command_str
+                        args = command_str.split(" ", 1)[1] if " " in command_str else ""
                             
                         print(f"\n\n[Auto running bash command: {command} with args {args}, use_shell={use_shell}]\n\n")
                         
                         # 构建工具调用参数
-                        tool_args = {
-                            "command": command,
-                            "args": args
-                        }
-                        
+                        tool_args = {"command": command, "args": args}
                         if use_shell:
                             tool_args["use_shell"] = True
                         
@@ -235,7 +193,6 @@ class MCPClient:
                     
                     # 更新历史消息
                     self._add_to_history(query, combined_result)
-                    
                     return combined_result
                 else:
                     # 如果找不到run_bash工具，回退到常规工具调用处理
@@ -243,15 +200,12 @@ class MCPClient:
             except Exception as e:
                 print(f"自动执行命令失败: {str(e)}")
                 # 命令执行失败，继续使用常规流程
-                if history_context:
-                    user_message = f"{history_context}\n\n当前查询: {translated_content}"
-                else:
-                    user_message = translated_content
+                user_message = f"{history_context}\n\n当前查询: {translated_content}" if history_context else translated_content
         else:
             # 进入常规工具调用处理
             user_message = query
         
-        # 在这里处理集成多服务器工具的情况
+        # 处理集成多服务器工具的情况
         if all_tools is not None and connected_servers is not None:
             try:
                 # 构建所有可用工具列表
@@ -271,7 +225,7 @@ class MCPClient:
                         {"role": "user", "content": user_message}
                     ],
                     tools=available_tools,
-                    tool_choice="auto"  # 自动选择最合适的工具
+                    tool_choice="auto"
                 )
                 
                 # 检查模型是否决定调用工具
@@ -307,12 +261,11 @@ class MCPClient:
                     response = self.client.chat.completions.create(
                         model=self.model,
                         messages=current_messages,
-                        temperature=0.3  # 使输出更加可控
+                        temperature=0.3
                     )
                     
                     # 更新历史消息
                     self._add_to_history(query, response.choices[0].message.content)
-                    
                     return response.choices[0].message.content
                 else:
                     # 模型没有选择调用工具，返回普通回复
@@ -320,10 +273,8 @@ class MCPClient:
                     
                     # 更新历史消息
                     self._add_to_history(query, response_content)
-                    
                     return response_content
             except Exception as e:
-                # 捕获工具调用中的异常
                 error_message = f"工具调用出错: {str(e)}"
                 print(f"\n[{error_message}]")
                 return f"处理请求时出错: {str(e)}"
@@ -372,12 +323,11 @@ class MCPClient:
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=current_messages,
-                    temperature=0.3  # 使输出更加可控
+                    temperature=0.3
                 )
                 
                 # 更新历史消息
                 self._add_to_history(query, response.choices[0].message.content)
-                
                 return response.choices[0].message.content
             else:
                 # 模型没有选择调用工具，返回普通回复
@@ -385,10 +335,8 @@ class MCPClient:
                 
                 # 更新历史消息
                 self._add_to_history(query, response_content)
-                
                 return response_content
         except Exception as e:
-            # 捕获工具调用中的异常
             error_message = f"工具调用出错: {str(e)}"
             print(f"\n[{error_message}]")
             return f"处理请求时出错: {str(e)}"
@@ -399,23 +347,18 @@ class MCPClient:
             return
         
         try:
-            # 首先确保所有子任务都被取消
             if hasattr(self, '_cleanup_pending_tasks'):
                 try:
                     await self._cleanup_pending_tasks()
                 except Exception as e:
                     print(f"取消待处理任务时出错: {str(e)}")
             
-            # 然后关闭exit_stack
             try:
-                # 使用超时机制关闭exit_stack，避免无限等待
                 await asyncio.wait_for(self._close_exit_stack(), timeout=3.0)
             except asyncio.TimeoutError:
                 print("警告: exit_stack关闭超时")
             except asyncio.CancelledError:
-                # 处理取消情况但继续尝试关闭资源
                 print("注意: 清理过程中发生取消操作")
-                # 强制关闭但不引发异常
                 try:
                     self._force_close_resources()
                 except Exception:
@@ -426,8 +369,7 @@ class MCPClient:
             print(f"清理资源时出错: {str(e)}")
         finally:
             # 确保资源引用被清除
-            if hasattr(self, 'exit_stack'):
-                self.exit_stack = None
+            self.exit_stack = None
             if hasattr(self, 'ws'):
                 self.ws = None 
             if hasattr(self, 'process'):
@@ -435,7 +377,7 @@ class MCPClient:
 
     async def _close_exit_stack(self):
         """安全地关闭exit_stack"""
-        if hasattr(self, 'exit_stack'):
+        if hasattr(self, 'exit_stack') and self.exit_stack:
             try:
                 await self.exit_stack.aclose()
             finally:
@@ -444,12 +386,11 @@ class MCPClient:
     def _force_close_resources(self):
         """强制关闭资源，用于紧急情况"""
         # 强制关闭进程
-        if hasattr(self, 'process') and self.process:
-            if hasattr(self.process, 'returncode') and self.process.returncode is None:
-                try:
-                    self.process.kill()
-                except Exception:
-                    pass
+        if hasattr(self, 'process') and self.process and hasattr(self.process, 'returncode') and self.process.returncode is None:
+            try:
+                self.process.kill()
+            except Exception:
+                pass
             self.process = None
         
         # 强制关闭websocket
@@ -462,12 +403,8 @@ class MCPClient:
 
     async def _cleanup_pending_tasks(self):
         """取消所有待处理的任务"""
-        if not hasattr(self, '_task_group') or not self._task_group:
-            return
-        
-        # 尝试优雅地取消任务组内的任务
-        try:
-            await self._task_group.cancel_scope.cancel()
-        except Exception:
-            # 忽略任何错误
-            pass
+        if hasattr(self, '_task_group') and self._task_group:
+            try:
+                await self._task_group.cancel_scope.cancel()
+            except Exception:
+                pass

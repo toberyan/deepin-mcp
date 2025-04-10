@@ -3,7 +3,7 @@ import os
 import sys
 import json
 import glob
-import subprocess
+import re
 from typing import List, Dict, Optional, Any
 from pathlib import Path
 
@@ -23,7 +23,7 @@ class TaskPlanner:
         self.model = os.getenv("MODEL")
         
         if not self.openai_api_key:
-            raise ValueError(f"\nOPENAI_API_KEY 未设置")
+            raise ValueError("OPENAI_API_KEY 未设置")
         
         self.client = OpenAI(
             api_key=self.openai_api_key,
@@ -32,6 +32,15 @@ class TaskPlanner:
         
         # 初始化MCP客户端
         self.mcp_client = MCPClient()
+        
+        # 默认配置
+        self.default_config = {
+            "servers": {},
+            "config": {
+                "auto_load_enabled": True,
+                "default_server": "bash"
+            }
+        }
         
         # 默认配置文件路径
         self.config_file = self._get_config_file_path()
@@ -54,19 +63,14 @@ class TaskPlanner:
         is_packaged = getattr(sys, 'frozen', False)
         
         # 获取可能的配置文件路径
-        search_paths = []
-        
-        # 当前工作目录
-        search_paths.append(Path.cwd() / "server_config.json")
-        
-        # 脚本所在目录
-        script_dir = Path(sys.argv[0]).resolve().parent
-        search_paths.append(script_dir / "server_config.json")
+        search_paths = [
+            Path.cwd() / "server_config.json",
+            Path(sys.argv[0]).resolve().parent / "server_config.json"
+        ]
         
         # 可执行文件所在目录（针对PyInstaller打包的应用）
         if is_packaged:
-            executable_dir = Path(sys.executable).resolve().parent
-            search_paths.append(executable_dir / "server_config.json")
+            search_paths.append(Path(sys.executable).resolve().parent / "server_config.json")
         
         # 检查配置文件是否存在
         for path in search_paths:
@@ -82,20 +86,11 @@ class TaskPlanner:
             print(f"\n服务器配置文件不存在: {self.config_file}")
             print("将创建默认配置文件...")
             
-            # 创建默认配置
-            default_config = {
-                "servers": {},
-                "config": {
-                    "auto_load_enabled": True,
-                    "default_server": "bash"
-                }
-            }
-            
             # 保存默认配置到文件
             with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(default_config, f, ensure_ascii=False, indent=2)
+                json.dump(self.default_config, f, ensure_ascii=False, indent=2)
             
-            return default_config
+            return self.default_config.copy()
         
         try:
             with open(self.config_file, 'r', encoding='utf-8') as f:
@@ -105,26 +100,13 @@ class TaskPlanner:
             if "servers" not in config:
                 config["servers"] = {}
             if "config" not in config:
-                config["config"] = {
-                    "auto_load_enabled": True,
-                    "default_server": "bash"
-                }
+                config["config"] = self.default_config["config"]
             
             return config
         except Exception as e:
             print(f"\n加载服务器配置文件失败: {str(e)}")
             print("将使用默认配置...")
-            
-            # 创建默认配置
-            default_config = {
-                "servers": {},
-                "config": {
-                    "auto_load_enabled": True,
-                    "default_server": "bash"
-                }
-            }
-            
-            return default_config
+            return self.default_config.copy()
 
     def save_server_config(self) -> bool:
         """保存服务器配置到文件"""
@@ -166,38 +148,27 @@ class TaskPlanner:
             Dict[str, str]: 服务器名称到路径的映射
         """
         server_paths = {}
-        
-        # 检查是否在打包环境中运行
         is_packaged = getattr(sys, 'frozen', False)
         
         # 获取可能的搜索路径
-        search_paths = []
-        
-        # 1. 当前工作目录及其servers子目录
-        search_paths.extend([
+        search_paths = [
             "*.py",
-            "servers/*.py"
-        ])
+            "servers/*.py",
+            str(Path(sys.argv[0]).resolve().parent / "*.py"),
+            str(Path(sys.argv[0]).resolve().parent / "servers" / "*.py")
+        ]
         
-        # 2. 脚本所在目录及其servers子目录
-        script_dir = Path(sys.argv[0]).resolve().parent
-        search_paths.extend([
-            str(script_dir / "*.py"),
-            str(script_dir / "servers" / "*.py")
-        ])
-        
-        # 3. 可执行文件所在目录（针对PyInstaller打包的应用）
+        # 添加打包环境特有的路径
         if is_packaged:
             executable_dir = Path(sys.executable).resolve().parent
             search_paths.extend([
                 str(executable_dir / "*.py"),
-                str(executable_dir / "servers" / "*.py")
-            ])
-            
-            # 在打包环境中添加对包装器脚本的搜索
-            search_paths.extend([
+                str(executable_dir / "servers" / "*.py"),
                 str(executable_dir / "servers" / "*.wrapper.py")
             ])
+        
+        # 跳过的文件名
+        skip_files = ['main.py', 'client.py', '__init__.py', '__main__.py']
         
         # 搜索所有路径
         for pattern in search_paths:
@@ -205,36 +176,29 @@ class TaskPlanner:
                 server_file = Path(server_path)
                 
                 # 跳过主程序文件、客户端文件等
-                if server_file.name in ['main.py', 'client.py', '__init__.py', '__main__.py']:
+                if server_file.name in skip_files:
                     continue
                 
                 # 获取服务器名称
+                server_name = None
                 if server_file.name.endswith('.wrapper.py'):
                     # 对于包装器脚本，去除.wrapper.py后缀
-                    orig_name = server_file.name[:-11]  # 移除".wrapper.py"
-                    server_name = orig_name
+                    server_name = server_file.name[:-11]  # 移除".wrapper.py"
                     if server_name.endswith('_server'):
                         server_name = server_name[:-7]  # 移除"_server"
-                else:
+                elif "server" in server_file.name.lower():
                     # 对于常规脚本，检查文件名是否包含"server"
-                    if "server" in server_file.name.lower():
-                        server_name = server_file.stem
-                        if server_name.endswith('_server'):
-                            server_name = server_name[:-7]  # 移除"_server"
-                    else:
-                        continue  # 不是服务器脚本
+                    server_name = server_file.stem
+                    if server_name.endswith('_server'):
+                        server_name = server_name[:-7]  # 移除"_server"
                 
-                # 将路径添加到可用服务器列表
-                server_paths[server_name] = str(server_file.resolve())
+                # 如果确定了服务器名称，将路径添加到可用服务器列表
+                if server_name:
+                    server_paths[server_name] = str(server_file.resolve())
         
         # 如果在打包环境中运行，优先使用包装器脚本
         if is_packaged:
-            run_server_script = None
-            for root in [Path(sys.executable).resolve().parent, Path.cwd()]:
-                script_path = root / "run_server.sh"
-                if script_path.exists():
-                    run_server_script = str(script_path)
-                    break
+            run_server_script = self._find_run_server_script()
             
             if run_server_script:
                 # 如果找到run_server.sh，替换所有路径为使用它的命令
@@ -253,6 +217,14 @@ class TaskPlanner:
                     server_paths = updated_paths
         
         return server_paths
+        
+    def _find_run_server_script(self) -> Optional[str]:
+        """查找run_server.sh脚本"""
+        for root in [Path(sys.executable).resolve().parent, Path.cwd()]:
+            script_path = root / "run_server.sh"
+            if script_path.exists():
+                return str(script_path)
+        return None
 
     def get_default_server_path(self) -> Optional[str]:
         """
@@ -295,65 +267,31 @@ class TaskPlanner:
         return None
 
     def list_available_servers(self) -> List[str]:
-        """
-        列出所有可用的服务器
-        
-        Returns:
-            List[str]: 可用服务器名称列表
-        """
+        """列出所有可用的服务器"""
         return list(self.server_config["servers"].keys())
     
     def get_server_status(self) -> Dict[str, Dict[str, Any]]:
-        """
-        获取所有服务器的状态
-        
-        Returns:
-            Dict[str, Dict[str, Any]]: 服务器状态信息
-        """
+        """获取所有服务器的状态"""
         return self.server_config["servers"]
 
-    def enable_server(self, server_name: str) -> bool:
-        """
-        启用服务器
-        
-        Args:
-            server_name: 服务器名称
-            
-        Returns:
-            bool: 是否成功启用
-        """
+    def _update_server_config(self, server_name: str, key: str, value: Any) -> bool:
+        """更新服务器配置中的特定键值"""
         if server_name in self.server_config["servers"]:
-            self.server_config["servers"][server_name]["enabled"] = True
+            self.server_config["servers"][server_name][key] = value
             self.save_server_config()
             return True
         return False
+
+    def enable_server(self, server_name: str) -> bool:
+        """启用服务器"""
+        return self._update_server_config(server_name, "enabled", True)
 
     def disable_server(self, server_name: str) -> bool:
-        """
-        禁用服务器
-        
-        Args:
-            server_name: 服务器名称
-            
-        Returns:
-            bool: 是否成功禁用
-        """
-        if server_name in self.server_config["servers"]:
-            self.server_config["servers"][server_name]["enabled"] = False
-            self.save_server_config()
-            return True
-        return False
+        """禁用服务器"""
+        return self._update_server_config(server_name, "enabled", False)
 
     def set_default_server(self, server_name: str) -> bool:
-        """
-        设置默认服务器
-        
-        Args:
-            server_name: 服务器名称
-            
-        Returns:
-            bool: 是否成功设置
-        """
+        """设置默认服务器"""
         if server_name in self.server_config["servers"]:
             # 清除之前的默认服务器
             for name in self.server_config["servers"]:
@@ -367,15 +305,7 @@ class TaskPlanner:
         return False
 
     def set_server(self, server_name: str) -> bool:
-        """
-        设置要使用的服务器
-        
-        Args:
-            server_name: 服务器名称或路径
-            
-        Returns:
-            bool: 是否成功设置
-        """
+        """设置要使用的服务器"""
         # 检查是否是已知的服务器名称
         if server_name in self.server_config["servers"]:
             # 先检查配置中的路径是否存在
@@ -399,13 +329,7 @@ class TaskPlanner:
         
         # 检查是否在打包环境中运行
         if getattr(sys, 'frozen', False):
-            # 尝试查找run_server.sh脚本
-            run_server_script = None
-            for root in [Path(sys.executable).resolve().parent, Path.cwd()]:
-                script_path = root / "run_server.sh"
-                if script_path.exists():
-                    run_server_script = str(script_path)
-                    break
+            run_server_script = self._find_run_server_script()
             
             if run_server_script:
                 # 尝试使用服务器名称构造run_server.sh命令
@@ -418,37 +342,30 @@ class TaskPlanner:
     async def plan_tasks(self, user_request: str) -> List[Dict[str, Any]]:
         """
         将用户请求拆分为多个按时间顺序执行的原子任务，并为每个任务标识最适合的工具类型
-        
-        Args:
-            user_request: 用户输入的请求
-            
-        Returns:
-            List[Dict[str, Any]]: 任务列表，每个任务包含描述和推荐工具类型
         """
+        system_content = """你是一个专业的任务分解助手。你的工作是将用户的复杂请求拆解为可以按顺序执行的具体原子任务列表，并为每个任务推荐最适合的工具类型。
+        请遵循以下规则：
+        1. 将复杂请求分解为3-8个简单、明确的原子任务
+        2. 每个任务必须具体、明确，便于后续处理
+        3. 为每个任务标识最适合的工具类型，可能的类型包括：
+           - bash: 适合文件操作、系统命令等
+           - weather: 适合天气查询
+           - calendar: 适合日历和时间管理操作
+           - email: 适合发送和管理邮件
+           - web: 适合网络搜索和浏览
+           - database: 适合数据库操作
+           - media: 适合媒体文件处理
+           - document: 适合文档处理
+           - general: 通用任务，无明确类别
+        4. 每个步骤应该是可独立执行的
+        5. 步骤之间应该有清晰的先后顺序关系
+        6. 如果后续步骤依赖于前面步骤的结果，必须明确指出
+        7. 以JSON格式返回，格式为：{"tasks": [{"description": "任务1描述", "tool_type": "工具类型1"}, {"description": "任务2描述", "tool_type": "工具类型2"}, ...]}
+        8. 不要使用Markdown格式化，直接返回原始JSON
+        """
+        
         messages = [
-            {
-                "role": "system", 
-                "content": """你是一个专业的任务分解助手。你的工作是将用户的复杂请求拆解为可以按顺序执行的具体原子任务列表，并为每个任务推荐最适合的工具类型。
-                请遵循以下规则：
-                1. 将复杂请求分解为3-8个简单、明确的原子任务
-                2. 每个任务必须具体、明确，便于后续处理
-                3. 为每个任务标识最适合的工具类型，可能的类型包括：
-                   - bash: 适合文件操作、系统命令等
-                   - weather: 适合天气查询
-                   - calendar: 适合日历和时间管理操作
-                   - email: 适合发送和管理邮件
-                   - web: 适合网络搜索和浏览
-                   - database: 适合数据库操作
-                   - media: 适合媒体文件处理
-                   - document: 适合文档处理
-                   - general: 通用任务，无明确类别
-                4. 每个步骤应该是可独立执行的
-                5. 步骤之间应该有清晰的先后顺序关系
-                6. 如果后续步骤依赖于前面步骤的结果，必须明确指出
-                7. 以JSON格式返回，格式为：{"tasks": [{"description": "任务1描述", "tool_type": "工具类型1"}, {"description": "任务2描述", "tool_type": "工具类型2"}, ...]}
-                8. 不要使用Markdown格式化，直接返回原始JSON
-                """
-            },
+            {"role": "system", "content": system_content},
             {"role": "user", "content": f"请将以下请求拆解为具体的执行步骤：{user_request}"}
         ]
         
@@ -464,8 +381,6 @@ class TaskPlanner:
         cleaned_content = content
         # 移除可能存在的Markdown代码块标记
         if "```" in cleaned_content:
-            # 提取```和```之间的内容
-            import re
             code_blocks = re.findall(r'```(?:json)?(.*?)```', cleaned_content, re.DOTALL)
             if code_blocks:
                 cleaned_content = code_blocks[0].strip()
@@ -485,12 +400,7 @@ class TaskPlanner:
             return [{"description": user_request, "tool_type": "general"}]
 
     async def connect_to_server(self) -> bool:
-        """
-        连接到所有启用的MCP服务器，并加载它们的所有工具
-        
-        Returns:
-            bool: 是否成功连接至少一个服务器
-        """
+        """连接到所有启用的MCP服务器，并加载它们的所有工具"""
         try:
             # 获取所有启用的服务器列表
             enabled_servers = {}
@@ -558,7 +468,6 @@ class TaskPlanner:
                 return False
             
             # 设置主客户端为第一个连接成功的服务器客户端
-            # 注：这仅用于向后兼容，实际上我们现在整合了所有服务器的工具
             first_server = next(iter(connected_servers.values()))
             self.mcp_client = first_server["client"]
             self.server_path = first_server["path"]
@@ -583,15 +492,7 @@ class TaskPlanner:
             return False
 
     async def execute_task(self, task: Dict[str, Any]) -> str:
-        """
-        执行单个任务，根据任务类型选择最合适的工具
-        
-        Args:
-            task: 要执行的任务，包含description和tool_type
-            
-        Returns:
-            str: 任务执行结果
-        """
+        """执行单个任务，根据任务类型选择最合适的工具"""
         try:
             # 如果没有连接服务器，尝试连接
             if not hasattr(self, 'connected_servers') or not self.connected_servers:
@@ -632,15 +533,7 @@ class TaskPlanner:
             return f"执行任务失败: {str(e)}"
 
     async def execute_tasks(self, tasks: List[Dict[str, Any]]) -> Dict[str, str]:
-        """
-        依次执行任务列表
-        
-        Args:
-            tasks: 任务列表，每个任务包含description和tool_type
-            
-        Returns:
-            Dict[str, str]: 任务执行结果字典
-        """
+        """依次执行任务列表"""
         results = {}
         
         # 创建任务执行进度显示
@@ -663,25 +556,18 @@ class TaskPlanner:
         return results
 
     async def summarize_results(self, user_request: str, tasks: List[Dict[str, Any]], results: Dict[str, str]) -> str:
-        """
-        汇总任务执行结果
+        """汇总任务执行结果"""
+        task_summary = chr(10).join([f"{i+1}. {task['description']} (工具类型: {task['tool_type']})" for i, task in enumerate(tasks)])
+        results_summary = chr(10).join([f"任务 {i+1}: {results[task['description']]}" for i, task in enumerate(tasks)])
         
-        Args:
-            user_request: 原始用户请求
-            tasks: 任务列表
-            results: 任务执行结果
-            
-        Returns:
-            str: 任务执行总结
-        """
         summary_prompt = f"""
 用户原始请求: {user_request}
 
 执行的任务:
-{chr(10).join([f"{i+1}. {task['description']} (工具类型: {task['tool_type']})" for i, task in enumerate(tasks)])}
+{task_summary}
 
 每个任务的结果:
-{chr(10).join([f"任务 {i+1}: {results[task['description']]}" for i, task in enumerate(tasks)])}
+{results_summary}
 
 请为用户提供一个简洁、全面的总结，说明完成了什么任务、取得了什么成果，以及可能的后续步骤。请使用第一人称，就好像你就是执行任务的助手。
 """
@@ -713,8 +599,6 @@ class TaskPlanner:
             try:
                 # 并行执行所有清理任务，允许部分失败
                 await asyncio.gather(*cleanup_tasks, return_exceptions=True)
-            except asyncio.CancelledError:
-                print("注意: 清理过程中被取消")
             except Exception as e:
                 print(f"清理过程中出现错误: {e}")
         
@@ -770,7 +654,6 @@ class TaskPlanner:
             raise
         except Exception as e:
             print(f"清理服务器客户端 {server_name} 时出错: {e}")
-            # 不重新引发异常，以便其他客户端可以继续清理
 
 async def main():
     planner = TaskPlanner()

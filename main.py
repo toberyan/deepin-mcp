@@ -114,7 +114,34 @@ class ChatCompletionResponse(BaseModel):
     choices: List[ChatChoice]
     usage: Dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
-# 处理chat completions API
+# 添加一个新的共用函数来执行任务
+async def execute_tasks_and_summarize(user_request: str) -> str:
+    """执行任务并生成总结的共用函数"""
+    global planner
+    
+    # 1. 规划任务
+    print("\n正在分析请求...")
+    tasks = await planner.plan_tasks(user_request)
+    
+    if not tasks:
+        return "未能从请求中提取出具体任务，请尝试更明确的描述"
+    
+    print(f"\n已将请求拆解为 {len(tasks)} 个任务:")
+    for i, task in enumerate(tasks, 1):
+        print(f"{i}. {task}")
+    
+    # 2. 执行任务
+    results = await planner.execute_tasks(tasks)
+    
+    # 3. 生成总结
+    print("\n所有任务已执行完毕，正在生成总结...")
+    summary = await planner.summarize_results(user_request, tasks, results)
+    
+    print("\n执行总结:")
+    print(summary)
+    
+    return summary
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest, background_tasks: BackgroundTasks):
     global planner
@@ -139,28 +166,8 @@ async def chat_completions(request: ChatCompletionRequest, background_tasks: Bac
         )
     else:
         try:
-            # 1. 规划任务
-            print("\n正在分析请求...")
-            tasks = await planner.plan_tasks(user_request)
-            
-            if not tasks:
-                content = "未能从请求中提取出具体任务，请尝试更明确的描述"
-                return create_completion_response(request.model, content)
-            
-            print(f"\n已将请求拆解为 {len(tasks)} 个任务:")
-            for i, task in enumerate(tasks, 1):
-                print(f"{i}. {task}")
-            
-            # 2. 执行任务
-            results = await planner.execute_tasks(tasks)
-            
-            # 3. 生成总结
-            print("\n所有任务已执行完毕，正在生成总结...")
-            summary = await planner.summarize_results(user_request, tasks, results)
-            
-            print("\n执行总结:")
-            print(summary)
-            
+            # 使用共用函数执行任务并生成总结
+            summary = await execute_tasks_and_summarize(user_request)
             return create_completion_response(request.model, summary)
         
         except Exception as e:
@@ -181,11 +188,52 @@ def create_completion_response(model: str, content: str) -> ChatCompletionRespon
         ]
     )
 
+async def ensure_tasks_cancelled(tasks=None):
+    """确保所有任务被取消"""
+    try:
+        if tasks is None:
+            # 获取所有任务
+            tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        
+        for task in tasks:
+            if not (task.done() or task.cancelled()):
+                task.cancel()
+                
+        # 允许任务有机会处理取消
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+    except Exception as e:
+        print(f"取消任务时出错: {str(e)}")
+    except KeyboardInterrupt:
+        pass  # 忽略取消过程中的键盘中断
+
 async def stream_completion(user_request: str, model: str):
     global planner
     
     # 创建一个队列用于存储输出
     queue = asyncio.Queue()
+    
+    # 创建SSE响应帮助函数
+    def create_sse_message(content=None, finish_reason=None):
+        data = {
+            'id': f'chatcmpl-{uuid.uuid4()}', 
+            'object': 'chat.completion.chunk', 
+            'created': int(asyncio.get_event_loop().time()), 
+            'model': model, 
+            'choices': [{
+                'index': 0, 
+                'delta': {} if content is None else {'content': content},
+                'finish_reason': finish_reason
+            }]
+        }
+        return f"data: {json.dumps(data)}\n\n"
+    
+    # 发送结束消息
+    def send_end_message():
+        return [
+            create_sse_message(finish_reason='stop'),
+            "data: [DONE]\n\n"
+        ]
     
     # 注册一个回调来接收控制台输出
     def output_callback(text):
@@ -196,37 +244,15 @@ async def stream_completion(user_request: str, model: str):
     
     try:
         # 发送SSE事件头部
-        yield f"data: {json.dumps({'id': f'chatcmpl-{uuid.uuid4()}', 'object': 'chat.completion.chunk', 'created': int(asyncio.get_event_loop().time()), 'model': model, 'choices': [{'index': 0, 'delta': {'role': 'assistant'}, 'finish_reason': None}]})}\n\n"
+        yield create_sse_message({'role': 'assistant'})
         
         # 执行任务的异步函数
         async def execute():
             try:
-                # 1. 规划任务
-                print("\n正在分析请求...")
-                tasks = await planner.plan_tasks(user_request)
-                
-                if not tasks:
-                    # 发送最后一条消息
-                    queue.put_nowait("\n未能从请求中提取出具体任务，请尝试更明确的描述")
-                    return
-                
-                print(f"\n已将请求拆解为 {len(tasks)} 个任务:")
-                for i, task in enumerate(tasks, 1):
-                    print(f"{i}. {task}")
-                
-                # 2. 执行任务
-                results = await planner.execute_tasks(tasks)
-                
-                # 3. 生成总结
-                print("\n所有任务已执行完毕，正在生成总结...")
-                summary = await planner.summarize_results(user_request, tasks, results)
-                
-                print("\n执行总结:")
-                print(summary)
-                
+                # 使用共用函数执行任务
+                await execute_tasks_and_summarize(user_request)
             except KeyboardInterrupt:
                 queue.put_nowait("\n检测到Ctrl+C，任务执行被中断")
-                return
             except Exception as e:
                 traceback_str = traceback.format_exc()
                 queue.put_nowait(f"\n处理请求时出现错误: {str(e)}\n{traceback_str}")
@@ -242,36 +268,33 @@ async def stream_completion(user_request: str, model: str):
                     # 将输出分成小块发送，以保持流畅的流式响应
                     for chunk in output.split('\n'):
                         if chunk:
-                            yield f"data: {json.dumps({'id': f'chatcmpl-{uuid.uuid4()}', 'object': 'chat.completion.chunk', 'created': int(asyncio.get_event_loop().time()), 'model': model, 'choices': [{'index': 0, 'delta': {'content': chunk + '\n'}, 'finish_reason': None}]})}\n\n"
+                            yield create_sse_message(chunk + '\n')
                             await asyncio.sleep(0.01)  # 短暂延迟以防止过快发送
             except asyncio.TimeoutError:
                 # 检查执行任务是否完成
                 if queue.empty() and (execute_task.done() or execute_task.cancelled()):
                     # 发送完成信号
-                    yield f"data: {json.dumps({'id': f'chatcmpl-{uuid.uuid4()}', 'object': 'chat.completion.chunk', 'created': int(asyncio.get_event_loop().time()), 'model': model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
-                    yield "data: [DONE]\n\n"
+                    for message in send_end_message():
+                        yield message
                     break
             except KeyboardInterrupt:
                 # 处理流式传输过程中的Ctrl+C
                 execute_task.cancel()
-                yield f"data: {json.dumps({'id': f'chatcmpl-{uuid.uuid4()}', 'object': 'chat.completion.chunk', 'created': int(asyncio.get_event_loop().time()), 'model': model, 'choices': [{'index': 0, 'delta': {'content': '\n检测到Ctrl+C，流式传输已中断\n'}, 'finish_reason': None}]})}\n\n"
-                yield f"data: {json.dumps({'id': f'chatcmpl-{uuid.uuid4()}', 'object': 'chat.completion.chunk', 'created': int(asyncio.get_event_loop().time()), 'model': model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
-                yield "data: [DONE]\n\n"
+                yield create_sse_message('\n检测到Ctrl+C，流式传输已中断\n')
+                for message in send_end_message():
+                    yield message
                 break
     except KeyboardInterrupt:
         # 处理整体流程中的Ctrl+C
-        yield f"data: {json.dumps({'id': f'chatcmpl-{uuid.uuid4()}', 'object': 'chat.completion.chunk', 'created': int(asyncio.get_event_loop().time()), 'model': model, 'choices': [{'index': 0, 'delta': {'content': '\n检测到Ctrl+C，流式传输已中断\n'}, 'finish_reason': None}]})}\n\n"
-        yield f"data: {json.dumps({'id': f'chatcmpl-{uuid.uuid4()}', 'object': 'chat.completion.chunk', 'created': int(asyncio.get_event_loop().time()), 'model': model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
-        yield "data: [DONE]\n\n"
+        yield create_sse_message('\n检测到Ctrl+C，流式传输已中断\n')
+        for message in send_end_message():
+            yield message
     finally:
         # 取消订阅
         output_capture.unsubscribe(sub_id)
         # 确保任务被取消
-        try:
-            if 'execute_task' in locals() and not (execute_task.done() or execute_task.cancelled()):
-                execute_task.cancel()
-        except:
-            pass
+        if 'execute_task' in locals():
+            await ensure_tasks_cancelled([execute_task])
 
 def parse_arguments():
     """解析命令行参数"""
@@ -297,26 +320,8 @@ async def run_cli_mode(query=None):
             # 直接执行指定查询
             print(f"\n执行查询: {query}")
             try:
-                # 规划任务
-                tasks = await planner.plan_tasks(query)
-                
-                if not tasks:
-                    print("\n未能从请求中提取出具体任务，请尝试更明确的描述")
-                    return
-                    
-                print(f"\n已将请求拆解为 {len(tasks)} 个任务:")
-                for i, task in enumerate(tasks, 1):
-                    print(f"{i}. {task}")
-                    
-                # 执行任务
-                results = await planner.execute_tasks(tasks)
-                
-                # 生成总结
-                print("\n所有任务已执行完毕，正在生成总结...")
-                summary = await planner.summarize_results(query, tasks, results)
-                
-                print("\n执行总结:")
-                print(summary)
+                # 使用共用函数执行任务
+                await execute_tasks_and_summarize(query)
             except Exception as e:
                 print(f"\n执行过程中出现错误: {str(e)}")
                 traceback_str = traceback.format_exc()
@@ -328,6 +333,36 @@ async def run_cli_mode(query=None):
     else:
         # 进入交互式模式
         await interactive_mode(planner)
+
+def update_env_file(key, value):
+    """更新.env文件中的设置"""
+    try:
+        # 读取现有.env文件内容
+        env_content = []
+        if os.path.exists(".env"):
+            with open(".env", "r") as f:
+                env_content = f.readlines()
+        
+        # 检查是否已存在配置项
+        setting_exists = False
+        for i, line in enumerate(env_content):
+            if line.startswith(f"{key}="):
+                env_content[i] = f"{key}={value}\n"
+                setting_exists = True
+                break
+        
+        # 如果不存在，则添加
+        if not setting_exists:
+            env_content.append(f"{key}={value}\n")
+        
+        # 写回文件
+        with open(".env", "w") as f:
+            f.writelines(env_content)
+            
+        return True
+    except Exception as e:
+        print(f"保存配置到.env文件时出错: {str(e)}")
+        return False
 
 async def start_api_server(port: Optional[int], host: str):
     """启动OpenAI兼容的API服务器"""
@@ -358,37 +393,12 @@ async def start_api_server(port: Optional[int], host: str):
     os.environ["MCP_API_HOST"] = host
     
     # 将端口和主机保存到.env文件
-    try:
-        # 读取现有.env文件内容
-        env_content = []
-        if os.path.exists(".env"):
-            with open(".env", "r") as f:
-                env_content = f.readlines()
-        
-        # 检查是否已存在配置项
-        port_exists = False
-        host_exists = False
-        for i, line in enumerate(env_content):
-            if line.startswith("MCP_API_PORT="):
-                env_content[i] = f"MCP_API_PORT={port}\n"
-                port_exists = True
-            elif line.startswith("MCP_API_HOST="):
-                env_content[i] = f"MCP_API_HOST={host}\n"
-                host_exists = True
-        
-        # 如果不存在，则添加
-        if not port_exists:
-            env_content.append(f"MCP_API_PORT={port}\n")
-        if not host_exists:
-            env_content.append(f"MCP_API_HOST={host}\n")
-        
-        # 写回文件
-        with open(".env", "w") as f:
-            f.writelines(env_content)
-            
+    port_updated = update_env_file("MCP_API_PORT", port)
+    host_updated = update_env_file("MCP_API_HOST", host)
+    
+    if port_updated and host_updated:
         print(f"API服务器配置已保存到.env文件")
-    except Exception as e:
-        print(f"保存配置到.env文件时出错: {str(e)}")
+    else:
         print(f"这不会影响程序运行，但下次启动时可能使用不同的端口")
     
     try:
@@ -429,6 +439,33 @@ async def start_api_server(port: Optional[int], host: str):
     finally:
         print("API服务器已停止")
 
+async def handle_server_management(args):
+    """处理服务器管理相关命令"""
+    if args.list_servers or args.enable_server or args.disable_server or args.set_default:
+        # 创建TaskPlanner实例用于服务器管理
+        temp_planner = TaskPlanner()
+        
+        if args.list_servers:
+            await list_servers(temp_planner)
+            return True
+            
+        if args.enable_server:
+            temp_planner.enable_server(args.enable_server)
+            print(f"\n已启用服务器: {args.enable_server}")
+            return True
+            
+        if args.disable_server:
+            temp_planner.disable_server(args.disable_server)
+            print(f"\n已禁用服务器: {args.disable_server}")
+            return True
+            
+        if args.set_default:
+            temp_planner.set_default_server(args.set_default)
+            print(f"\n已将 {args.set_default} 设置为默认服务器")
+            return True
+    
+    return False
+
 async def main_async():
     """异步主函数"""
     args = parse_arguments()
@@ -439,28 +476,8 @@ async def main_async():
         load_dotenv()
         
         # 处理服务器管理命令
-        if args.list_servers or args.enable_server or args.disable_server or args.set_default:
-            # 创建TaskPlanner实例用于服务器管理
-            temp_planner = TaskPlanner()
-            
-            if args.list_servers:
-                await list_servers(temp_planner)
-                return
-                
-            if args.enable_server:
-                temp_planner.enable_server(args.enable_server)
-                print(f"\n已启用服务器: {args.enable_server}")
-                return
-                
-            if args.disable_server:
-                temp_planner.disable_server(args.disable_server)
-                print(f"\n已禁用服务器: {args.disable_server}")
-                return
-                
-            if args.set_default:
-                temp_planner.set_default_server(args.set_default)
-                print(f"\n已将 {args.set_default} 设置为默认服务器")
-                return
+        if await handle_server_management(args):
+            return
         
         # 创建TaskPlanner实例
         planner = TaskPlanner()
@@ -534,20 +551,8 @@ def main():
         try:
             # 获取所有任务前首先检查循环是否已关闭
             if not loop.is_closed():
-                pending = asyncio.all_tasks(loop)
-                for task in pending:
-                    task.cancel()
-                
-                # 允许任务有机会处理取消
-                if pending:
-                    try:
-                        # 等待所有任务处理它们的取消
-                        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-                    except Exception as e:
-                        print(f"关闭待处理任务时出错: {str(e)}")
-                    except KeyboardInterrupt:
-                        # 如果在关闭过程中再次按下Ctrl+C，不显示错误信息
-                        pass
+                # 取消所有任务
+                loop.run_until_complete(ensure_tasks_cancelled())
                 
                 # 最后关闭事件循环
                 loop.close()
@@ -559,6 +564,20 @@ def main():
                     loop.close()
             except:
                 pass
+
+async def handle_server_action(planner, server_name, action):
+    """处理服务器操作"""
+    if action == 'enable':
+        planner.enable_server(server_name)
+        print(f"\n已启用服务器: {server_name}")
+    elif action == 'disable':
+        planner.disable_server(server_name)
+        print(f"\n已禁用服务器: {server_name}")
+    elif action == 'default':
+        planner.set_default_server(server_name)
+        print(f"\n已将 {server_name} 设置为默认服务器")
+    else:
+        print("\n无效的操作")
 
 async def manage_servers_interactive(planner: TaskPlanner):
     """服务器管理交互界面"""
@@ -597,18 +616,9 @@ async def manage_servers_interactive(planner: TaskPlanner):
                 if 0 <= choice_index < len(server_names):
                     selected_server = server_names[choice_index]
                     
-                    if choice == 'E':
-                        # 启用服务器
-                        planner.enable_server(selected_server)
-                        print(f"\n已启用服务器: {selected_server}")
-                    elif choice == 'D':
-                        # 禁用服务器
-                        planner.disable_server(selected_server)
-                        print(f"\n已禁用服务器: {selected_server}")
-                    elif choice == 'S':
-                        # 设置默认服务器
-                        planner.set_default_server(selected_server)
-                        print(f"\n已将 {selected_server} 设置为默认服务器")
+                    # 使用统一的处理函数
+                    action = 'enable' if choice == 'E' else ('disable' if choice == 'D' else 'default')
+                    await handle_server_action(planner, selected_server, action)
                 else:
                     print("\n无效的选择")
             except ValueError:
@@ -638,16 +648,11 @@ async def manage_servers_interactive(planner: TaskPlanner):
                 sub_choice = input("\n请选择操作: ").strip()
                 
                 if sub_choice == '1':
-                    if server_info["enabled"]:
-                        planner.disable_server(selected_server)
-                        print(f"\n已禁用服务器: {selected_server}")
-                    else:
-                        planner.enable_server(selected_server)
-                        print(f"\n已启用服务器: {selected_server}")
+                    action = 'disable' if server_info["enabled"] else 'enable'
+                    await handle_server_action(planner, selected_server, action)
                 elif sub_choice == '2':
                     if not server_info.get("default", False):
-                        planner.set_default_server(selected_server)
-                        print(f"\n已将 {selected_server} 设置为默认服务器")
+                        await handle_server_action(planner, selected_server, 'default')
             else:
                 print("\n无效的选择")
         except ValueError:
@@ -707,16 +712,22 @@ async def interactive_mode(planner: TaskPlanner):
             if confirm != 'y':
                 print("\n已取消任务执行")
                 continue
+            
+            # 2. 执行任务并生成总结
+            try:
+                # 使用execute_tasks_and_summarize函数的部分功能
+                results = await planner.execute_tasks(tasks)
                 
-            # 2. 执行任务
-            results = await planner.execute_tasks(tasks)
-            
-            # 3. 生成总结
-            print("\n所有任务已执行完毕，正在生成总结...")
-            summary = await planner.summarize_results(user_request, tasks, results)
-            
-            print("\n执行总结:")
-            print(summary)
+                # 生成总结
+                print("\n所有任务已执行完毕，正在生成总结...")
+                summary = await planner.summarize_results(user_request, tasks, results)
+                
+                print("\n执行总结:")
+                print(summary)
+            except Exception as e:
+                print(f"\n执行过程中出现错误: {str(e)}")
+                traceback_str = traceback.format_exc()
+                print(traceback_str)
             
         except KeyboardInterrupt:
             print("\n检测到Ctrl+C，正在退出程序...")
