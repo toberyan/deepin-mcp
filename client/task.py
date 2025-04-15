@@ -139,9 +139,14 @@ class TaskManager:
                 suitable_tools, 
                 self.connected_servers
             )
+            # 打印任务执行结果
+            print(f"\n任务执行结果:")
+            print(result)
             return result
         except Exception as e:
-            return f"执行任务失败: {str(e)}"
+            error_msg = f"执行任务失败: {str(e)}"
+            print(f"\n{error_msg}")
+            return error_msg
 
     async def execute_tasks(self, tasks: List[Dict[str, Any]], mcp_client, connected_servers, all_tools) -> Dict[str, str]:
         """
@@ -169,11 +174,27 @@ class TaskManager:
             result = await self.execute_task(task, mcp_client, connected_servers, all_tools)
             results[task['description']] = result
             
-            # 更新任务状态
+            # 更新任务状态并显示结果摘要
             print("\n任务执行状态:")
             for j, t in enumerate(tasks, 1):
                 status = "✓" if j <= i else " "
-                print(f"{j}. [{status}] {t['description']}")
+                if j < i:
+                    print(f"{j}. [{status}] {t['description']}")
+                elif j == i:
+                    # 对当前完成的任务显示结果摘要
+                    result_summary = results[t['description']]
+                    if len(result_summary) > 100:
+                        result_summary = result_summary[:97] + "..."
+                    print(f"{j}. [{status}] {t['description']} - 结果: {result_summary}")
+                else:
+                    print(f"{j}. [{status}] {t['description']}")
+            
+        # 打印所有任务的完整结果
+        print("\n所有任务执行结果:")
+        for i, task in enumerate(tasks, 1):
+            print(f"\n任务 {i}: {task['description']}")
+            print(f"结果: {results[task['description']]}")
+            print("-" * 40)
         
         return results
 

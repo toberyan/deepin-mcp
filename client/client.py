@@ -280,7 +280,7 @@ class MCPClient:
                     response = self.client.chat.completions.create(
                         model=self.model,
                         messages=current_messages,
-                        temperature=0.3
+                        temperature=0.6
                     )
                     
                     # 更新历史消息
@@ -330,7 +330,7 @@ class MCPClient:
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=current_messages,
-                    temperature=0.3
+                    temperature=0.6
                 )
                 
                 # 更新历史消息

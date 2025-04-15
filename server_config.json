@@ -1,0 +1,32 @@
+{
+  "servers": {
+    "file": {
+      "path": "/home/toberyan/workspace/deepin-mcp/servers/file_server.py",
+      "description": "file服务器",
+      "enabled": true,
+      "default": false
+    },
+    "bash": {
+      "path": "/home/toberyan/workspace/deepin-mcp/servers/bash_server.py",
+      "description": "bash服务器",
+      "enabled": true,
+      "default": false
+    },
+    "weather": {
+      "path": "/home/toberyan/workspace/deepin-mcp/servers/weather_server.py",
+      "description": "weather服务器",
+      "enabled": false,
+      "default": false
+    },
+    "baidu_search": {
+      "path": "/home/toberyan/workspace/deepin-mcp/servers/baidu_search.py",
+      "description": "浏览器搜索服务器",
+      "enabled": true,
+      "default": false
+    }
+  },
+  "config": {
+    "auto_load_enabled": true,
+    "default_server": "bash"
+  }
+}

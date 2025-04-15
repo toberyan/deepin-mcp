@@ -91,7 +91,7 @@ class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[Dict[str, str]]
     stream: bool = False
-    temperature: float = 0.7
+    temperature: float = 0.6
     max_tokens: Optional[int] = None
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None
@@ -140,7 +140,17 @@ async def execute_tasks_and_summarize(user_request: str) -> str:
     print("\n执行总结:")
     print(summary)
     
-    return summary
+    # 4. 构建包含详细结果和总结的完整响应
+    detailed_results = "\n\n各任务详细结果:\n"
+    for i, task in enumerate(tasks, 1):
+        detailed_results += f"\n任务 {i}: {task['description']}\n"
+        detailed_results += f"结果: {results[task['description']]}\n"
+        detailed_results += "-" * 40 + "\n"
+    
+    # 组合总结和详细结果
+    complete_response = f"{summary}\n{detailed_results}"
+    
+    return complete_response
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest, background_tasks: BackgroundTasks):
@@ -715,7 +725,7 @@ async def interactive_mode(planner: TaskPlanner):
             
             # 2. 执行任务并生成总结
             try:
-                # 使用execute_tasks_and_summarize函数的部分功能
+                # 执行任务
                 results = await planner.execute_tasks(tasks)
                 
                 # 生成总结
@@ -724,6 +734,14 @@ async def interactive_mode(planner: TaskPlanner):
                 
                 print("\n执行总结:")
                 print(summary)
+                
+                # 显示完整结果
+                print("\n各任务详细结果:")
+                for i, task in enumerate(tasks, 1):
+                    print(f"\n任务 {i}: {task['description']}")
+                    print(f"结果: {results[task['description']]}")
+                    print("-" * 40)
+                
             except Exception as e:
                 print(f"\n执行过程中出现错误: {str(e)}")
                 traceback_str = traceback.format_exc()
