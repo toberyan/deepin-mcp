@@ -111,23 +111,62 @@ class MCPClient:
                 history_context += f"{i}. {cmd}\n"
             history_context += "\n请参考上述历史查询，理解用户可能的意图。"
         
-        # 将用户查询翻译为bash命令
-        trans_messages = [
-            {"role": "system", "content": f"你是Linux命令行大师，将输入内容全部理解并翻译为 Linux bash 命令。如果涉及到打开文件操作，请使用xdg-open命令。请不要解释命令功能，只输出命令本身。格式为：CMD:实际命令。例如对于'显示当前目录'，只需返回'CMD:ls'。对于复杂命令，如果需要使用shell特性（如管道、重定向），应添加参数'use_shell:true'，例如：'CMD:ls -la | grep .txt;use_shell:true'。{history_context if history_context else ''}"},
-            {"role": "user", "content": query}
-        ]
-        translation_response = self.client.chat.completions.create(
-            model=self.model,
-            messages=trans_messages
-        )
+        # 首先检查可用的工具类型
+        bash_tool_available = False
+        available_tools = []
         
-        # 获取翻译后的命令
-        translated_content = translation_response.choices[0].message.content
-        print(f"\n原始查询: {query}")
-        print(f"翻译结果: {translated_content}")
+        try:
+            # 获取可用工具列表
+            if all_tools is not None:
+                tool_list = all_tools
+            else:
+                response = await self.session.list_tools()
+                tool_list = response.tools
+            
+            # 构建可用工具列表并检查是否有bash工具
+            available_tools = [{"type": "function", 
+                              "function": {
+                                  "name": tool.name, 
+                                  "description": tool.description, 
+                                  "input_schema": tool.inputSchema
+                                  }
+                              } for tool in tool_list]
+            
+            # 检查是否存在run_bash工具
+            for tool in available_tools:
+                if tool["function"]["name"] == "run_bash":
+                    bash_tool_available = True
+                    break
+        except Exception as e:
+            print(f"获取工具列表时出错: {str(e)}")
+            available_tools = []
+            
+        # 仅当存在bash工具时才进行命令翻译
+        translated_content = ""
+        is_bash_command = False
         
-        # 检查是否返回了有效的命令格式
-        if "CMD:" in translated_content and (all_tools is None or connected_servers is None):
+        if bash_tool_available:
+            # 将用户查询翻译为bash命令
+            trans_messages = [
+                {"role": "system", "content": f"你是Linux命令行大师，将输入内容全部理解并翻译为 Linux bash 命令。如果涉及到打开文件操作，请使用xdg-open命令。请不要解释命令功能，只输出命令本身。格式为：CMD:实际命令。例如对于'显示当前目录'，只需返回'CMD:ls'。对于复杂命令，如果需要使用shell特性（如管道、重定向），应添加参数'use_shell:true'，例如：'CMD:ls -la | grep .txt;use_shell:true'。{history_context if history_context else ''}"},
+                {"role": "user", "content": query}
+            ]
+            translation_response = self.client.chat.completions.create(
+                model=self.model,
+                messages=trans_messages
+            )
+            
+            # 获取翻译后的命令
+            translated_content = translation_response.choices[0].message.content
+            print(f"\n原始查询: {query}")
+            print(f"翻译结果: {translated_content}")
+            
+            # 检查是否返回了有效的命令格式
+            if "CMD:" in translated_content:
+                is_bash_command = True
+                
+        # 如果是bash命令并且有bash工具可用，则自动执行命令
+        if is_bash_command and bash_tool_available and (all_tools is None or connected_servers is None):
             # 提取命令部分
             cmd_parts = translated_content.split("CMD:", 1)[1].strip()
             
@@ -147,17 +186,6 @@ class MCPClient:
                 print(f"\n识别到命令，正在执行: {commands[0]}")
                 
             try:
-                response = await self.session.list_tools()
-                
-                # 构建可用工具列表
-                available_tools = [{"type": "function", 
-                                  "function": {
-                                      "name": tool.name, 
-                                      "description": tool.description, 
-                                      "input_schema": tool.inputSchema
-                                      }
-                                  } for tool in response.tools]
-                
                 # 查找run_bash工具
                 bash_tool = None
                 for tool in available_tools:
@@ -202,21 +230,12 @@ class MCPClient:
                 # 命令执行失败，继续使用常规流程
                 user_message = f"{history_context}\n\n当前查询: {translated_content}" if history_context else translated_content
         else:
-            # 进入常规工具调用处理
+            # 如果没有翻译成bash命令或者没有bash工具可用，使用原始查询
             user_message = query
         
         # 处理集成多服务器工具的情况
         if all_tools is not None and connected_servers is not None:
             try:
-                # 构建所有可用工具列表
-                available_tools = [{"type": "function", 
-                                   "function": {
-                                       "name": tool.name, 
-                                       "description": tool.description, 
-                                       "input_schema": tool.inputSchema
-                                       }
-                                   } for tool in all_tools]
-                
                 # 使用模型选择最合适的工具
                 content = self.client.chat.completions.create(
                     model=self.model,
@@ -281,18 +300,6 @@ class MCPClient:
         
         # 使用常规流程处理查询
         try:
-            # 获取可用工具列表
-            response = await self.session.list_tools()
-            
-            # 构建可用工具列表
-            available_tools = [{"type": "function", 
-                               "function": {
-                                   "name": tool.name, 
-                                   "description": tool.description, 
-                                   "input_schema": tool.inputSchema
-                                   }
-                               } for tool in response.tools]
-            
             content = self.client.chat.completions.create(
                 model=self.model,
                 messages=self.history_messages + [{"role": "user", "content": user_message}],
